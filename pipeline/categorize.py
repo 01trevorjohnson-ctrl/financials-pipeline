@@ -1,6 +1,8 @@
 """Categorization: category_keys keyword matching + the special cases
 encoded in category_keys.notes that aren't expressible as plain keyword
-substrings, plus the fallback policy for genuinely unrecognized merchants.
+substrings, plus an LLM fallback (see llm_categorize_uncategorized below)
+for rows no keyword matches, plus the final fallback policy (plain
+Uncategorized + needs_review) for whatever's left after that.
 
 Special cases implemented here (see category_keys.notes for the household's
 own wording of each):
@@ -33,10 +35,18 @@ own wording of each):
 """
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
 
 UNCATEGORIZED = 'Uncategorized'
 NEEDS_REVIEW_THRESHOLD = 50.00  # dollars; adjustable -- see README
+
+LLM_MODEL = 'claude-haiku-4-5'  # small/fast classification call, same choice as dashboard/ask.py
+LLM_MAX_ROWS_PER_CALL = 200  # safety valve; a real statement never gets close to this
+
+logger = logging.getLogger(__name__)
 
 _ZELLE_TREVOR_RE = re.compile(r'ACH\s+\S*\s*TREVOR JOHNSON', re.I)
 
@@ -74,6 +84,100 @@ def fallback_flow(txn_type: str, amount) -> str:
     if t == 'Credit' or (amount is not None and amount < 0):
         return 'Refund'
     return 'Spend'
+
+
+def is_llm_configured() -> bool:
+    return bool(os.environ.get('ANTHROPIC_API_KEY'))
+
+
+def _llm_client():
+    import anthropic
+    return anthropic.Anthropic()
+
+
+def llm_categorize_uncategorized(rows_with_indices: list, category_flow_map: dict) -> dict:
+    """One batched Claude call classifying every keyword-unmatched row from
+    ONE statement at once (a "row" here is (original_index, TxnRow-like)).
+    ``category_flow_map`` is {category: flow}, built by the caller from the
+    same category_keys rows already loaded for keyword matching -- so the
+    model is constrained (via JSON-schema enum) to categories the household
+    actually uses, never a category it invents.
+
+    Returns {original_index: (category, flow)} -- ONLY for rows the model
+    confidently placed in a real category. Rows it left/returned as
+    "Uncategorized", rows with an invalid index/category, and rows dropped
+    by a parse failure are simply absent from the result; the caller's
+    existing (Uncategorized, fallback_flow(...)) result for those rows is
+    untouched. This function never raises: a missing API key, a network
+    error, a malformed response, or anything else means "no help this
+    time," not a failed pipeline run -- keyword categorization plus the
+    existing needs_review threshold is the safety net this degrades to.
+    """
+    if not rows_with_indices or not is_llm_configured():
+        return {}
+    if len(rows_with_indices) > LLM_MAX_ROWS_PER_CALL:
+        logger.warning('Skipping LLM categorization: %d uncategorized rows exceeds the %d-row '
+                        'safety cap for one call.', len(rows_with_indices), LLM_MAX_ROWS_PER_CALL)
+        return {}
+
+    categories = sorted(category_flow_map.keys())
+    schema = {
+        'type': 'object',
+        'properties': {
+            'results': {
+                'type': 'array',
+                'items': {
+                    'type': 'object',
+                    'properties': {
+                        'index': {'type': 'integer'},
+                        'category': {'type': 'string', 'enum': categories + [UNCATEGORIZED]},
+                    },
+                    'required': ['index', 'category'],
+                    'additionalProperties': False,
+                },
+            },
+        },
+        'required': ['results'],
+        'additionalProperties': False,
+    }
+    lines = [
+        f'{idx}: merchant="{row.merchant or ""}" description="{row.description or ""}" '
+        f'amount={row.amount} type="{row.type or ""}"'
+        for idx, row in rows_with_indices
+    ]
+    system = (
+        'You categorize household credit-card/bank transactions for a US/Panama household, for '
+        'rows that did not match any of their existing keyword rules. Assign each transaction '
+        f'EXACTLY ONE of these categories: {", ".join(categories)}. Use "{UNCATEGORIZED}" ONLY '
+        'when you genuinely cannot tell -- an unfamiliar or foreign-language merchant name is not '
+        'by itself a reason to give up; use the merchant name, description, amount, and typical '
+        'purchase patterns to make a reasonable call. Many merchant names are in Spanish or are '
+        'Panama-local businesses (restaurants, pharmacies, transport, utilities). Return exactly '
+        'one result per transaction index given, covering every index exactly once.'
+    )
+    try:
+        resp = _llm_client().messages.create(
+            model=LLM_MODEL,
+            max_tokens=4096,
+            system=system,
+            messages=[{'role': 'user', 'content': '\n'.join(lines)}],
+            output_config={'format': {'type': 'json_schema', 'schema': schema}},
+        )
+        text = next(b.text for b in resp.content if b.type == 'text')
+        parsed = json.loads(text)
+    except Exception as e:
+        logger.warning('LLM categorization call failed, falling back to Uncategorized: %s', e)
+        return {}
+
+    valid_indices = {idx for idx, _row in rows_with_indices}
+    out = {}
+    for item in parsed.get('results') or []:
+        idx = item.get('index')
+        category = item.get('category')
+        if idx not in valid_indices or category not in category_flow_map:
+            continue  # covers category == UNCATEGORIZED too -- nothing to override
+        out[idx] = (category, category_flow_map[category])
+    return out
 
 
 class Categorizer:

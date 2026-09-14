@@ -126,14 +126,47 @@ contract (see section 1).
      both match the `Delivery` category keyword directly.
    - Income vs. Refund precedence for "ACH CRE ..." lines: handled
      automatically by `category_keys.priority` ordering.
-7. Anything matching **no** category is `category='Uncategorized'` with a
-   best-effort `flow` guess from the transaction's type. Per statement: if
-   the *sum* of that statement's Uncategorized amounts is **>= $50**, every
-   Uncategorized row from that statement is queued into `needs_review`
-   (this single check subsumes "any single row >= $50", since the sum is
-   always >= any individual row -- see `pipeline/categorize.py` docstring).
-   **This $50 threshold is adjustable** -- it's `NEEDS_REVIEW_THRESHOLD` in
+7. Anything matching **no** keyword goes through one more step before
+   giving up: a single batched Claude API call per statement (see "LLM
+   categorization fallback" below), classifying every keyword-unmatched row
+   in that statement at once, constrained to the household's real category
+   list. Whatever's still unclassified after that -- because the model
+   itself said "Uncategorized", because `ANTHROPIC_API_KEY` isn't set on
+   the pipeline service, or because the call failed for any reason -- is
+   `category='Uncategorized'` with a best-effort `flow` guess from the
+   transaction's type. Per statement: if the *sum* of that statement's
+   remaining Uncategorized amounts is **>= $50**, every Uncategorized row
+   from that statement is queued into `needs_review` (this single check
+   subsumes "any single row >= $50", since the sum is always >= any
+   individual row -- see `pipeline/categorize.py` docstring). **This $50
+   threshold is adjustable** -- it's `NEEDS_REVIEW_THRESHOLD` in
    `pipeline/categorize.py`.
+
+### LLM categorization fallback
+
+`category_keys` keyword matching is fast and free but only ever catches
+*exact* substrings -- a real statement has one-off merchant strings
+(specific restaurant names, format variants like `"UBER *TRIP"` vs.
+`"UBER TRIP"`) that no reasonably-sized keyword list will ever fully
+enumerate. Rather than dumping all of those into manual review every time,
+`pipeline/categorize.py: llm_categorize_uncategorized()` makes **one
+batched Claude call per statement** covering every row the keyword loop
+left as Uncategorized, asking the model to pick from the household's own
+real category list (built from `category_keys`, not hardcoded -- the model
+is constrained via JSON-schema `enum` and can never invent a category).
+Rows the model can't confidently place stay "Uncategorized" and flow into
+the existing `needs_review` threshold above, same as before this existed.
+
+This degrades gracefully and never blocks a pipeline run: if
+`ANTHROPIC_API_KEY` isn't set on the pipeline service, if the API call
+fails, or if the response doesn't parse, the function catches it, logs a
+warning, and returns nothing to override -- every affected row simply
+falls through to the pre-existing Uncategorized + needs_review behavior.
+Model: `claude-haiku-4-5`, same choice as the dashboard's Ask page (see
+below) -- a small/fast model is the right fit for a constrained
+classification call, not open-ended reasoning. **`ANTHROPIC_API_KEY` must
+be set on the pipeline service** (not just the dashboard's) for this
+fallback to actually run in production -- see the env var table below.
 8. On success: inserts `processed_statements` (`status='processed'`), all
    `transactions` rows (with `statement_id` set), any `needs_review` rows;
    then in Drive, moves+renames the original (now in root) into
@@ -385,6 +418,7 @@ git push -u origin main
 | pipeline | `GOOGLE_SERVICE_ACCOUNT_KEY` | The full contents of the service-account JSON key file you already downloaded from Google Cloud Console (IAM & Admin -> Service Accounts -> your account -> Keys), pasted as a single-line string value. |
 | pipeline | `GOOGLE_DRIVE_ROOT_FOLDER_ID` *(optional)* | Defaults to `1Vdnu5u9doehcyNdNZJLxvD7OTaYSPx8a` (the "Johnson Suarez Financials" folder). Only set this if the folder ever changes. |
 | pipeline | `GOOGLE_DRIVE_STANDARDIZED_FOLDER_ID` *(optional)* | Defaults to `15bTjig6O9mUQ8TZ5jV1avfHSDA2LJl5r` ("Source Documents (Standardized Names)"). |
+| pipeline | `ANTHROPIC_API_KEY` **(new)** | Same key as the dashboard's own (see below), from [console.anthropic.com](https://console.anthropic.com). Powers the LLM categorization fallback (see "LLM categorization fallback" above). If unset, the pipeline just skips that step -- keyword-unmatched rows go straight to Uncategorized/needs_review as before, no error. |
 | dashboard | `SUPABASE_URL` | Same as above. |
 | dashboard | `SUPABASE_SERVICE_KEY` | Same `service_role` key as the pipeline (see "why the dashboard prefers the service key" above). Server-side only. |
 | dashboard | `SUPABASE_ANON_KEY` *(optional, forward-looking)* | Same API settings page -> **Project API keys -> `anon` `public`**. Currently unused unless `SUPABASE_SERVICE_KEY` is absent (see above); set it anyway so it's ready once real Supabase Auth is added. |
@@ -529,6 +563,21 @@ confirm.
   `SAVINGS_COLOR`; see `dashboard/colors.py` and "Category colors" above.
   A category not in that table (future `category_keys` addition) gets a
   deterministic hash-based color instead of breaking.
+- **`category_keys` keyword expansion, data-driven**: after the household
+  reported real miscategorized rows (Uber variants landing Uncategorized,
+  a Costco membership fee not matching Subscriptions), ran a gap-detection
+  query against `transactions` (grouped by category/flow/merchant) joined
+  against `category_keys.keywords` to find every merchant whose real,
+  already-correct category would NOT be reproduced by the existing keyword
+  list on a reprocess. Added ~50 new keywords across 10 categories from
+  that result -- generalizable brand/merchant strings only (e.g. `'UBER
+  *TRIP'`, `'COSTCO'`), deliberately skipping one-off (`n=1`) restaurant/
+  merchant strings that wouldn't generalize to future statements, matching
+  the household's own existing keyword style. Re-running the same
+  gap-detection query afterward confirmed both the Uber and Costco cases
+  are fully resolved; ~230 largely one-off merchants remain as an
+  irreducible tail -- that tail is exactly what the LLM fallback above
+  exists to catch instead of a keyword list chasing every one-off forever.
 
 ## 6. What I could NOT do from here (needs you)
 

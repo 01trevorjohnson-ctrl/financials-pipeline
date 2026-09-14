@@ -44,7 +44,7 @@ from typing import List
 from . import db
 from . import drive_client
 from . import naming
-from .categorize import Categorizer, NEEDS_REVIEW_THRESHOLD, UNCATEGORIZED
+from .categorize import Categorizer, NEEDS_REVIEW_THRESHOLD, UNCATEGORIZED, llm_categorize_uncategorized
 from .parsers import parse_file
 from .parsers.common import UnrecognizedStatementError
 
@@ -186,6 +186,25 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
     wise_giving, wise_invest = db.get_wise_category_counts(supabase)
     categorizer = Categorizer(category_keys, wise_giving, wise_invest)
     cats = categorizer.categorize_batch(result.rows)
+
+    # ---- LLM fallback for rows no keyword matched ---------------------------
+    # One batched call per statement, covering every row categorize_batch left
+    # as Uncategorized. Never blocks/fails the run -- see
+    # llm_categorize_uncategorized's docstring for the full degrade policy
+    # (missing ANTHROPIC_API_KEY, a network error, or a bad response all just
+    # mean these rows keep their existing Uncategorized + needs_review result).
+    category_flow_map = {}
+    for ck in category_keys:
+        category_flow_map.setdefault(ck['category'], ck['flow'])
+    uncategorized_indices = [(i, result.rows[i]) for i, (cat, _flow) in enumerate(cats)
+                              if cat == UNCATEGORIZED]
+    if uncategorized_indices:
+        llm_results = llm_categorize_uncategorized(uncategorized_indices, category_flow_map)
+        if llm_results:
+            logger.info('LLM categorized %d/%d keyword-unmatched row(s) for %s',
+                        len(llm_results), len(uncategorized_indices), original_filename)
+        for i, (category, flow) in llm_results.items():
+            cats[i] = (category, flow)
 
     # ---- build standardized filename ---------------------------------------
     dates = [t.date for t in result.rows]
