@@ -14,6 +14,16 @@
     {% if not series %}
       <p class="budget-note-summary">No spend data yet.</p>
     {% else %}
+      <div class="trends-range-row">
+        <label class="trends-range-field">
+          <span>From</span>
+          <select id="trendsFrom" class="trends-range-select"></select>
+        </label>
+        <label class="trends-range-field">
+          <span>To</span>
+          <select id="trendsTo" class="trends-range-select"></select>
+        </label>
+      </div>
       <div class="trends-chart-wrap">
         <canvas id="trendsChart" height="260"></canvas>
       </div>
@@ -24,6 +34,7 @@
     <section class="budget-panel">
       <div class="budget-panel-head">
         <div class="budget-panel-title">Categories</div>
+        <button type="button" id="trendsToggleAll" class="trends-toggle-all-btn">Deselect all</button>
       </div>
       <div class="trends-cat-list">
         {% for s in series %}
@@ -31,7 +42,7 @@
             <span class="trends-cat-swatch" style="background: {{ s.color }};"></span>
             <input type="checkbox" data-idx="{{ loop.index0 }}" class="trends-cat-checkbox" {{ 'checked' if s.default_on else '' }}>
             <span class="trends-cat-name">{{ s.category }}</span>
-            <span class="trends-cat-total">${{ "{:,.0f}".format(s.total) }}</span>
+            <span class="trends-cat-total" data-idx="{{ loop.index0 }}">${{ "{:,.0f}".format(s.total) }}</span>
           </label>
         {% endfor %}
       </div>
@@ -45,8 +56,12 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"></script>
 <script>
 (function () {
-  var monthLabels = {{ month_labels|tojson }};
-  var series = {{ series|tojson }};
+  // Full, unfiltered data straight from the server -- the month-range
+  // selector re-slices these client-side rather than re-fetching, since
+  // the whole dataset is already small enough to ship in one response.
+  var allMonths = {{ months|tojson }};
+  var allMonthLabels = {{ month_labels|tojson }};
+  var series = {{ series|tojson }};  // each s.data is aligned to allMonths
 
   var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
   var gridColor = isDark ? 'rgba(255,255,255,0.12)' : 'rgba(36,31,51,0.09)';
@@ -55,7 +70,7 @@
   var datasets = series.map(function (s) {
     return {
       label: s.category,
-      data: s.data,
+      data: s.data.slice(),
       borderColor: s.color,
       backgroundColor: s.color,
       pointRadius: 2,
@@ -69,7 +84,7 @@
   var ctx = document.getElementById('trendsChart').getContext('2d');
   var chart = new Chart(ctx, {
     type: 'line',
-    data: { labels: monthLabels, datasets: datasets },
+    data: { labels: allMonthLabels.slice(), datasets: datasets },
     options: {
       responsive: true,
       maintainAspectRatio: false,
@@ -101,6 +116,73 @@
       chart.update();
     });
   });
+
+  // ---- select / deselect all -------------------------------------------
+  var toggleAllBtn = document.getElementById('trendsToggleAll');
+  var checkboxes = Array.prototype.slice.call(document.querySelectorAll('.trends-cat-checkbox'));
+
+  function anyChecked() {
+    return checkboxes.some(function (b) { return b.checked; });
+  }
+  function refreshToggleLabel() {
+    toggleAllBtn.textContent = anyChecked() ? 'Deselect all' : 'Select all';
+  }
+  toggleAllBtn.addEventListener('click', function () {
+    var turnOn = !anyChecked();
+    checkboxes.forEach(function (box, idx) {
+      box.checked = turnOn;
+      chart.setDatasetVisibility(idx, turnOn);
+    });
+    chart.update();
+    refreshToggleLabel();
+  });
+  checkboxes.forEach(function (box) {
+    box.addEventListener('change', refreshToggleLabel);
+  });
+
+  // ---- month range selector ---------------------------------------------
+  var fromSelect = document.getElementById('trendsFrom');
+  var toSelect = document.getElementById('trendsTo');
+  var totalEls = {};
+  document.querySelectorAll('.trends-cat-total').forEach(function (el) {
+    totalEls[el.getAttribute('data-idx')] = el;
+  });
+
+  allMonths.forEach(function (m, i) {
+    var label = allMonthLabels[i];
+    var optFrom = document.createElement('option');
+    optFrom.value = i; optFrom.textContent = label;
+    fromSelect.appendChild(optFrom);
+    var optTo = document.createElement('option');
+    optTo.value = i; optTo.textContent = label;
+    toSelect.appendChild(optTo);
+  });
+  fromSelect.value = 0;
+  toSelect.value = allMonths.length - 1;
+
+  function applyRange() {
+    var start = parseInt(fromSelect.value, 10);
+    var end = parseInt(toSelect.value, 10);
+    if (start > end) {
+      // Keep the range valid without fighting the user -- snap the OTHER
+      // end to match whichever one they just moved past it.
+      if (this === fromSelect) { end = start; toSelect.value = end; }
+      else { start = end; fromSelect.value = start; }
+    }
+
+    chart.data.labels = allMonthLabels.slice(start, end + 1);
+    series.forEach(function (s, i) {
+      var sliced = s.data.slice(start, end + 1);
+      chart.data.datasets[i].data = sliced;
+      var total = sliced.reduce(function (a, b) { return a + b; }, 0);
+      var el = totalEls[i];
+      if (el) el.textContent = '$' + total.toLocaleString(undefined, { maximumFractionDigits: 0 });
+    });
+    chart.update();
+  }
+
+  fromSelect.addEventListener('change', applyRange);
+  toSelect.addEventListener('change', applyRange);
 })();
 </script>
 {% endif %}
