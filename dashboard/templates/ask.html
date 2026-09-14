@@ -46,13 +46,14 @@
       <p class="ask-answer-text">{{ result.answer }}</p>
 
       <div class="ask-data">
+        {% set is_dollar_metric = result.spec.metric in ('sum', 'average') %}
         {% if result.data.breakdown %}
           <table class="ask-table">
             <tbody>
               {% for key, value in result.data.breakdown.items() %}
                 <tr>
                   <td>{{ key }}</td>
-                  <td class="num">${{ "{:,.2f}".format(value) }}</td>
+                  <td class="num">{% if is_dollar_metric %}${{ "{:,.2f}".format(value) }}{% else %}{{ "{:,.0f}".format(value) }}{% endif %}</td>
                 </tr>
               {% endfor %}
             </tbody>
@@ -61,7 +62,7 @@
           <div class="stat-row">
             <div class="stat-tile">
               <div class="stat-label">{{ result.spec.metric|capitalize }}</div>
-              <div class="stat-value">${{ "{:,.2f}".format(result.data.total) }}</div>
+              <div class="stat-value">{% if is_dollar_metric %}${{ "{:,.2f}".format(result.data.total) }}{% else %}{{ "{:,.0f}".format(result.data.total) }}{% endif %}</div>
             </div>
             <div class="stat-tile">
               <div class="stat-label">Transactions</div>

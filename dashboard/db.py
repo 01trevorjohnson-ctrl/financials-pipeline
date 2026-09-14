@@ -37,6 +37,45 @@ from functools import lru_cache
 from supabase import create_client, Client
 
 
+PAGE_SIZE = 1000
+MAX_PAGES = 100  # safety valve (100k rows) against a runaway loop; not a real ceiling
+
+
+def _fetch_all(build_query) -> list:
+    """`build_query` is a zero-arg callable that returns a FRESH,
+    not-yet-ranged supabase-py table builder each time it's called (e.g.
+    ``lambda: client.table('transactions').select('date').eq('flow', 'Spend')``)
+    -- NOT an already-built query object. This function calls it once per
+    page and applies `.range()` to that fresh instance.
+
+    That "fresh instance per call" requirement is not stylistic: postgrest-py's
+    `.range()` adds to httpx's `QueryParams`, which is immutable per call --
+    calling `.range()` a second time on the SAME builder instance appends a
+    second offset/limit pair (`offset=0&offset=1000&...`) instead of replacing
+    the first, silently corrupting pagination. Rebuilding the query fresh for
+    every page sidesteps that entirely.
+
+    PostgREST (what supabase-py talks to) caps a single response at a
+    server-configured default -- 1000 rows on a stock Supabase project --
+    with NO error or warning when a query has more matches than that; it
+    just silently returns the first page. Every `transactions` query in this
+    app must go through this helper instead of a bare `.execute()`, because
+    the household already has 2000+ rows: any unpaginated query here quietly
+    undercounts real data instead of failing loudly, which is worse than a
+    crash. (`needs_review` queries are filtered to `status='open'`, a small
+    set, and are left as plain `.execute()` calls.)"""
+    rows: list = []
+    start = 0
+    for _ in range(MAX_PAGES):
+        resp = build_query().range(start, start + PAGE_SIZE - 1).execute()
+        batch = resp.data or []
+        rows.extend(batch)
+        if len(batch) < PAGE_SIZE:
+            break
+        start += PAGE_SIZE
+    return rows
+
+
 @lru_cache(maxsize=1)
 def get_client() -> Client:
     url = os.environ.get('SUPABASE_URL')
@@ -128,15 +167,14 @@ def get_distinct_spend_categories(client: Client) -> list:
     """Distinct transactions.category values actually present for
     flow='Spend' -- real data, not the category_keys catalog (which may
     include categories with zero transactions, or exclude ad hoc ones)."""
-    resp = client.table('transactions').select('category').eq('flow', 'Spend').execute()
-    return sorted({r['category'] for r in (resp.data or []) if r.get('category')})
+    rows = _fetch_all(lambda: client.table('transactions').select('category').eq('flow', 'Spend'))
+    return sorted({r['category'] for r in rows if r.get('category')})
 
 
 def get_monthly_spend_by_category(client: Client) -> dict:
     """Returns {category: {'YYYY-MM': total_amount, ...}, ...} for every
     flow='Spend' transaction, bucketed by calendar month in Python."""
-    resp = client.table('transactions').select('date, category, amount').eq('flow', 'Spend').execute()
-    rows = resp.data or []
+    rows = _fetch_all(lambda: client.table('transactions').select('date, category, amount').eq('flow', 'Spend'))
 
     by_cat: dict = defaultdict(lambda: defaultdict(float))
     for r in rows:
@@ -178,13 +216,13 @@ def month_label(month_key: str) -> str:
 # never string-interpolating LLM output into a query.
 # ---------------------------------------------------------------------------
 def get_distinct_categories_all_flows(client: Client) -> list:
-    resp = client.table('transactions').select('category').execute()
-    return sorted({r['category'] for r in (resp.data or []) if r.get('category')})
+    rows = _fetch_all(lambda: client.table('transactions').select('category'))
+    return sorted({r['category'] for r in rows if r.get('category')})
 
 
 def get_distinct_flows(client: Client) -> list:
-    resp = client.table('transactions').select('flow').execute()
-    return sorted({r['flow'] for r in (resp.data or []) if r.get('flow')})
+    rows = _fetch_all(lambda: client.table('transactions').select('flow'))
+    return sorted({r['flow'] for r in rows if r.get('flow')})
 
 
 def run_ask_query(client: Client, *, date_from: str | None, date_to: str | None,
@@ -195,14 +233,16 @@ def run_ask_query(client: Client, *, date_from: str | None, date_to: str | None,
     function does not trust its caller further, but it also does no
     string interpolation of any kind, so there is no injection surface
     regardless)."""
-    q = client.table('transactions').select('date, amount, category, flow, merchant, cardholder')
-    if date_from:
-        q = q.gte('date', date_from)
-    if date_to:
-        q = q.lte('date', date_to)
-    if categories:
-        q = q.in_('category', categories)
-    if flow:
-        q = q.eq('flow', flow)
-    resp = q.execute()
-    return resp.data or []
+    def build():
+        q = client.table('transactions').select('date, amount, category, flow, merchant, cardholder')
+        if date_from:
+            q = q.gte('date', date_from)
+        if date_to:
+            q = q.lte('date', date_to)
+        if categories:
+            q = q.in_('category', categories)
+        if flow:
+            q = q.eq('flow', flow)
+        return q
+
+    return _fetch_all(build)
