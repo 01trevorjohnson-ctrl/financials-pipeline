@@ -1,18 +1,25 @@
 # Financials Pipeline
 
-Automates the Johnson/Suarez household's monthly finance ledger. Two
-independent Railway *services* sharing one repo AND, as of this version,
-one Python package tree at the repo root (see "Architecture" below):
+Automates the Johnson/Suarez household's monthly finance ledger. Three
+Railway *services* sharing one repo AND one Python package tree at the
+repo root (see "Architecture" below):
 
 - **`pipeline/`** -- importable package whose `run_pipeline()` (in
-  `pipeline/main.py`) is the pipeline's entire logic, run either on a
-  schedule (Railway **Cron Job**) or on demand from the dashboard's "Run
-  Pipeline Now" button. Watches a shared Google Drive folder for new
-  bank/card statements, parses them, reconciles the parsed transactions
-  against each statement's own printed totals, categorizes every row, and
-  writes everything to Supabase. Never guesses: anything it can't
-  confidently parse, reconcile, or categorize is left for a human (file
-  stays in Drive; a `needs_review` row is queued).
+  `pipeline/main.py`) is the pipeline's entire logic, run on a schedule
+  (Railway **Cron Job**), on demand over HTTP (`pipeline/trigger_app.py`,
+  see section 1b), or on demand from the dashboard's "Run Pipeline Now"
+  button. Watches a shared Google Drive folder for new bank/card
+  statements, parses them, reconciles the parsed transactions against each
+  statement's own printed totals, categorizes every row, and writes
+  everything to Supabase. Never guesses: anything it can't confidently
+  parse, reconcile, or categorize is left for a human (file stays in
+  Drive; a `needs_review` row is queued).
+- **`pipeline/trigger_app.py`** -- a tiny FastAPI app (Railway **Web
+  Service**, always-on) exposing `POST /run` over plain HTTP, bearer-token
+  gated (`PIPELINE_TRIGGER_SECRET`). Added so the household's other app
+  (`fam-fin`, Next.js/TypeScript -- no Python runtime of its own) can
+  trigger an on-demand run without importing this package in-process the
+  way the dashboard does. See section 1b.
 - **`dashboard/`** -- a FastAPI + Jinja2 web app (Railway **Web Service**,
   always-on), password-gated, styled to match the FAMILY app's "budget"
   visual language (see "UI" below). Four mobile-first pages behind a
@@ -22,6 +29,12 @@ one Python package tree at the repo root (see "Architecture" below):
   by the Claude API). The old Summary and Assets & Liabilities pages were
   removed per the household's request; their underlying `dashboard/db.py`
   query patterns and the Supabase tables themselves are untouched.
+  **Status: being superseded.** The household is porting this dashboard's
+  pages natively into `fam-fin` (same Supabase project, real Supabase Auth
+  instead of this app's single shared password) and plans to decommission
+  this service once that native version has full parity -- see `fam-fin`'s
+  own repo for progress. Nothing here changes until then; this service
+  keeps running as-is.
 
 Data lives in Supabase Postgres, project `family-finance`
 (`wfpaakmjveuhugskqmup`). This repo does not create or alter that schema.
@@ -213,6 +226,59 @@ Run it locally (with a populated `.env`, see below), from the repo root:
 pip install -r requirements.txt
 python -m pipeline.main
 ```
+
+## 1b. The trigger service (`pipeline/trigger_app.py`)
+
+A minimal FastAPI app, separate from both `pipeline/main.py`'s cron
+entrypoint and `dashboard/main.py`, exposing exactly two routes:
+
+- `GET /healthz` -- plain liveness check, no auth.
+- `POST /run` -- requires `Authorization: Bearer <PIPELINE_TRIGGER_SECRET>`;
+  calls `pipeline.main.run_pipeline()` synchronously and returns the same
+  fields the dashboard's flash message uses (`ok`, `files_found`,
+  `files_processed`, `transactions_inserted`, `needs_review_queued`,
+  `failed`, etc.) as JSON, plus `summary_lines` (the same human-readable
+  lines the cron log / dashboard flash message show).
+
+This exists for exactly one reason: `fam-fin` (the household's other app,
+Next.js/TypeScript) has no Python runtime, so it cannot import
+`run_pipeline()` in-process the way `dashboard/main.py`'s `/run-pipeline`
+route does. This gives it an HTTP seam instead. Auth is a single shared
+secret, not per-user -- the caller is a server (fam-fin's own backend,
+using a server-only env var), not a browser, so there's no session/cookie
+to check, matching the "keep this simple" posture of the dashboard's own
+single-password gate.
+
+Run it locally, from the repo root:
+
+```bash
+pip install -r requirements.txt
+PIPELINE_TRIGGER_SECRET=dev-secret python -m uvicorn pipeline.trigger_app:app --reload --port 8001
+curl -X POST localhost:8001/run -H "Authorization: Bearer dev-secret"
+```
+
+### Deploying the trigger service to Railway
+
+1. Same repo, **New -> GitHub Repo** again (a third service from this one
+   repo, same pattern as pipeline/dashboard).
+2. Settings:
+   - **Service Name**: `financials-pipeline-trigger` (or similar).
+   - **Root Directory**: the repo root (`.` / leave blank) -- same reason
+     as the other two services (needs `pipeline.*` importable).
+   - **Deploy -> Custom Start Command**:
+     `python -m uvicorn pipeline.trigger_app:app --host 0.0.0.0 --port $PORT`
+   - **Service Type**: **Web Service** (always-on, not a Cron Job -- it
+     needs to be listening for fam-fin's request at any time).
+3. Environment variables: the same `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`,
+   `GOOGLE_SERVICE_ACCOUNT_KEY`, and optionally `ANTHROPIC_API_KEY` as the
+   pipeline service (see the table below), **plus** a new
+   `PIPELINE_TRIGGER_SECRET` -- pick a long random string, and set that
+   same value as `PIPELINE_TRIGGER_SECRET` on fam-fin's own Railway service
+   so its "Run Pipeline Now" button can authenticate.
+4. Deploy. Generate a public domain (**Settings -> Networking -> Public
+   Networking -> Generate Domain**) and confirm
+   `https://<that domain>/healthz` returns `{"ok": true}`. Give that base
+   URL to fam-fin as `PIPELINE_TRIGGER_URL`.
 
 ## 2. How the dashboard works
 
@@ -490,6 +556,11 @@ git push -u origin main
 | pipeline | `GOOGLE_DRIVE_ROOT_FOLDER_ID` *(optional)* | Defaults to `1Vdnu5u9doehcyNdNZJLxvD7OTaYSPx8a` (the "Johnson Suarez Financials" folder). Only set this if the folder ever changes. |
 | pipeline | `GOOGLE_DRIVE_STANDARDIZED_FOLDER_ID` *(optional)* | Defaults to `15bTjig6O9mUQ8TZ5jV1avfHSDA2LJl5r` ("Source Documents (Standardized Names)"). |
 | pipeline | `ANTHROPIC_API_KEY` **(new)** | Same key as the dashboard's own (see below), from [console.anthropic.com](https://console.anthropic.com). Powers the LLM categorization fallback (see "LLM categorization fallback" above). If unset, the pipeline just skips that step -- keyword-unmatched rows go straight to Uncategorized/needs_review as before, no error. |
+| trigger | `SUPABASE_URL` | Same as above. |
+| trigger | `SUPABASE_SERVICE_KEY` | Same `service_role` key as the pipeline. |
+| trigger | `GOOGLE_SERVICE_ACCOUNT_KEY` | Same value as the pipeline's own key above -- `/run` calls `run_pipeline()`, which needs Drive access to do anything. |
+| trigger | `ANTHROPIC_API_KEY` *(optional)* | Same as the pipeline's own -- see above; omit and the LLM categorization fallback is just skipped. |
+| trigger | `PIPELINE_TRIGGER_SECRET` **(new)** | Pick a long random string. Set the identical value as `PIPELINE_TRIGGER_SECRET` on fam-fin's own Railway service (see fam-fin's README) so its "Run Pipeline Now" button can authenticate. Never expose this to a browser. |
 | dashboard | `SUPABASE_URL` | Same as above. |
 | dashboard | `SUPABASE_SERVICE_KEY` | Same `service_role` key as the pipeline (see "why the dashboard prefers the service key" above). Server-side only. |
 | dashboard | `SUPABASE_ANON_KEY` *(optional, forward-looking)* | Same API settings page -> **Project API keys -> `anon` `public`**. Currently unused unless `SUPABASE_SERVICE_KEY` is absent (see above); set it anyway so it's ready once real Supabase Auth is added. |
