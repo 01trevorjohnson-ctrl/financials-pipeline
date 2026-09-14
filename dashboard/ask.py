@@ -45,8 +45,23 @@ FILTER_SPEC_SCHEMA = {
     'properties': {
         'metric': {
             'type': 'string',
-            'enum': ['sum', 'count', 'average'],
-            'description': 'What to compute over the matching transactions.',
+            'enum': ['sum', 'count', 'average', 'list'],
+            'description': (
+                'What to compute over the matching transactions. Use "list" -- not sum/count/'
+                'average -- for any question asking about specific transaction(s) rather than a '
+                'total: "what was our most recent transaction", "show me our Amazon purchases in '
+                'June", "what did we buy at Costco last week". sum/count/average only answer '
+                '"how much"/"how many"/"on average" questions; they cannot identify which '
+                'transaction(s) something was.'
+            ),
+        },
+        'limit': {
+            'type': 'integer',
+            'description': (
+                'Only used when metric="list": how many matching transactions to return, most '
+                'recent first. Use 1 for "the most recent transaction" / "the last time we...", '
+                'a small number (5-20) for "show me our recent X purchases", ignored otherwise.'
+            ),
         },
         'date_from': {
             'type': 'string',
@@ -68,12 +83,15 @@ FILTER_SPEC_SCHEMA = {
         'group_by': {
             'type': 'string',
             'enum': ['category', 'month', 'none'],
-            'description': 'How to break down the result, or "none" for a single total.',
+            'description': 'How to break down the result, or "none" for a single total. Ignored when metric="list".',
         },
     },
-    'required': ['metric', 'date_from', 'date_to', 'categories', 'flow', 'group_by'],
+    'required': ['metric', 'limit', 'date_from', 'date_to', 'categories', 'flow', 'group_by'],
     'additionalProperties': False,
 }
+
+LIST_LIMIT_DEFAULT = 10
+LIST_LIMIT_MAX = 50
 
 
 def is_configured() -> bool:
@@ -100,8 +118,13 @@ def validate_spec(raw: dict, categories: list, flows: list) -> dict:
     REAL distinct values queried from Supabase, and sanity-check the dates.
     Never trusts the model's output past this point."""
     metric = raw.get('metric')
-    if metric not in ('sum', 'count', 'average'):
+    if metric not in ('sum', 'count', 'average', 'list'):
         metric = 'sum'
+
+    limit = raw.get('limit')
+    if not isinstance(limit, int) or limit < 1:
+        limit = LIST_LIMIT_DEFAULT
+    limit = min(limit, LIST_LIMIT_MAX)
 
     date_from = _safe_date(raw.get('date_from'))
     date_to = _safe_date(raw.get('date_to'))
@@ -120,8 +143,10 @@ def validate_spec(raw: dict, categories: list, flows: list) -> dict:
     group_by = raw.get('group_by')
     if group_by not in ('category', 'month'):
         group_by = None
+    if metric == 'list':
+        group_by = None  # list returns individual rows, grouping doesn't apply
 
-    return {'metric': metric, 'date_from': date_from, 'date_to': date_to,
+    return {'metric': metric, 'limit': limit, 'date_from': date_from, 'date_to': date_to,
             'categories': cats, 'flow': flow, 'group_by': group_by}
 
 
@@ -139,7 +164,11 @@ def build_filter_spec(question: str, categories: list, flows: list) -> dict:
         'flow="Spend". Infer relative date phrases ("this month", "last month", "in July", '
         '"this year", "last 90 days") relative to today\'s date. If the question asks "what\'s '
         'our biggest category", use metric="sum" and group_by="category" with no category '
-        'filter, so every category can be compared.'
+        'filter, so every category can be compared. If the question asks about a specific '
+        'transaction or a handful of them by name/place/recency ("most recent", "last time we '
+        'bought from X", "show me our Y purchases") rather than a total, use metric="list" with '
+        'an appropriate limit -- these questions cannot be answered by a sum/count/average, only '
+        'by looking at the actual matching rows.'
     )
     resp = _client().messages.create(
         model=ASK_MODEL,
@@ -152,7 +181,29 @@ def build_filter_spec(question: str, categories: list, flows: list) -> dict:
     return json.loads(text)
 
 
-def compute_metric(rows: list, metric: str, group_by: str | None) -> dict:
+def compute_metric(rows: list, metric: str, group_by: str | None, limit: int = LIST_LIMIT_DEFAULT) -> dict:
+    if metric == 'list':
+        # Most-recent-first covers "most recent transaction" directly, and
+        # is the most useful default ordering for "show me our X purchases"
+        # too. transaction_count is the TOTAL matching count (before the
+        # limit is applied), so the answer can say e.g. "here are the 10
+        # most recent of 47 matching transactions".
+        ordered = sorted(rows, key=lambda r: r.get('date') or '', reverse=True)
+        picked = ordered[:limit]
+        return {
+            'transactions': [
+                {
+                    'date': r.get('date'),
+                    'merchant': r.get('merchant'),
+                    'amount': round(r.get('amount') or 0, 2),
+                    'category': r.get('category'),
+                    'cardholder': r.get('cardholder'),
+                }
+                for r in picked
+            ],
+            'transaction_count': len(rows),
+        }
+
     def agg(values: list) -> float:
         if metric == 'count':
             return len(values)
@@ -181,10 +232,13 @@ def compute_metric(rows: list, metric: str, group_by: str | None) -> dict:
 
 def phrase_answer(question: str, result_data: dict) -> str:
     system = (
-        'You answer a household\'s finance question using ONLY the exact numbers given below, '
-        'already computed from their real transaction data -- never invent or adjust a number. '
-        'Give a short, direct answer (one to three sentences), formatting dollar amounts like '
-        '$1,234.56.'
+        'You answer a household\'s finance question using ONLY the exact data given below, '
+        'already computed/looked up from their real transaction data -- never invent or adjust a '
+        'number, date, or merchant name. Give a short, direct answer (one to three sentences), '
+        'formatting dollar amounts like $1,234.56. If the data is a list of individual '
+        'transactions (not a total/count/average), name the specific one(s) that answer the '
+        'question -- e.g. for "most recent transaction", name the single most recent row\'s date, '
+        'merchant, and amount, not just how many rows were returned.'
     )
     resp = _client().messages.create(
         model=ASK_MODEL,
@@ -211,7 +265,7 @@ def answer_question(supabase_client, question: str) -> dict:
 
     rows = db.run_ask_query(supabase_client, date_from=spec['date_from'], date_to=spec['date_to'],
                              categories=spec['categories'], flow=spec['flow'])
-    result_data = compute_metric(rows, spec['metric'], spec['group_by'])
+    result_data = compute_metric(rows, spec['metric'], spec['group_by'], spec['limit'])
 
     answer_text = phrase_answer(question, result_data)
     return {'answer': answer_text, 'spec': spec, 'data': result_data}

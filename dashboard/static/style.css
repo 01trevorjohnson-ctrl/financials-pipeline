@@ -420,6 +420,18 @@ form { display: flex; flex-direction: column; gap: 12px; }
 .ask-table td { padding: 6px 2px; border-bottom: 1px solid var(--bud-border); }
 .ask-table tr:last-child td { border-bottom: none; }
 .ask-table td.num { text-align: right; font-variant-numeric: tabular-nums; font-weight: 600; }
+.ask-table th {
+  padding: 4px 2px 8px;
+  text-align: left;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--bud-ink-soft);
+  border-bottom: 1px solid var(--bud-border);
+}
+.ask-table th.num { text-align: right; }
+.ask-table-list td { overflow-wrap: anywhere; }
 .ask-spec { line-height: 1.5; }
 
 /* ---------- responsive ---------- */
