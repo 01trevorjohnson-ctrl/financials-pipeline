@@ -67,3 +67,24 @@
   <circle cx="12" cy="16.6" r="0.15" fill="currentColor" stroke="currentColor" />
 </svg>
 {% endmacro %}
+
+{% macro icon_download(cls='') %}
+<svg class="{{ cls }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M12 4v11.5" />
+  <path d="M7.2 11.2 12 16l4.8-4.8" />
+  <path d="M5 19.5h14" />
+</svg>
+{% endmacro %}
+
+{% macro icon_checkbox_checked(cls='') %}
+<svg class="{{ cls }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4" y="4" width="16" height="16" rx="5" />
+  <path d="M8 12.2 10.8 15l5.2-6" />
+</svg>
+{% endmacro %}
+
+{% macro icon_checkbox_empty(cls='') %}
+<svg class="{{ cls }}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <rect x="4" y="4" width="16" height="16" rx="5" />
+</svg>
+{% endmacro %}

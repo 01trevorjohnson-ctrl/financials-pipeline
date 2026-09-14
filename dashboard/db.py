@@ -130,6 +130,17 @@ def get_active_categories(client: Client) -> list:
     return sorted({r['category'] for r in (resp.data or [])})
 
 
+# ---------------------------------------------------------------------------
+# Home: statement coverage checklist (see dashboard/coverage.py)
+# ---------------------------------------------------------------------------
+def get_processed_account_names_and_periods(client: Client) -> list:
+    """account_name/statement_period for every successfully-processed
+    statement -- the raw material dashboard/coverage.py matches against the
+    13 known account names to find each one's most recent statement."""
+    return _fetch_all(lambda: client.table('processed_statements')
+                       .select('account_name, statement_period').eq('status', 'processed'))
+
+
 def resolve_needs_review(client: Client, review_id: str, category: str) -> None:
     review_resp = client.table('needs_review').select('*').eq('id', review_id).limit(1).execute()
     review_rows = review_resp.data or []
@@ -246,3 +257,33 @@ def run_ask_query(client: Client, *, date_from: str | None, date_to: str | None,
         return q
 
     return _fetch_all(build)
+
+
+# ---------------------------------------------------------------------------
+# Export: the household's own copy of the ledger, in formats meant to be
+# taken elsewhere -- a spreadsheet tool, or pasted/uploaded to an LLM for
+# further analysis -- now that the source-of-truth Excel workbook is
+# retired in favor of Supabase. Every query here goes through _fetch_all
+# for the same reason as everywhere else in this file: an unpaginated
+# query silently truncates at 1000 rows.
+# ---------------------------------------------------------------------------
+def get_all_transactions_for_export(client: Client) -> list:
+    rows = _fetch_all(lambda: client.table('transactions')
+                       .select('date, time, cardholder, amount, points, balance, status, type, '
+                               'merchant, description, card, flow, category'))
+    return sorted(rows, key=lambda r: r.get('date') or '')
+
+
+def get_full_export_bundle(client: Client) -> dict:
+    """Every table this app reads from, each as a plain list of dicts --
+    meant for a single "download everything" JSON export. Table names are
+    the dict keys so the file is self-describing without a README."""
+    return {
+        'accounts': _fetch_all(lambda: client.table('accounts').select('*')),
+        'category_keys': _fetch_all(lambda: client.table('category_keys').select('*')),
+        'processed_statements': _fetch_all(lambda: client.table('processed_statements').select('*')),
+        'transactions': get_all_transactions_for_export(client),
+        'needs_review': _fetch_all(lambda: client.table('needs_review').select('*')),
+        'assets_liabilities': _fetch_all(lambda: client.table('assets_liabilities').select('*')),
+        'income_paychecks': _fetch_all(lambda: client.table('income_paychecks').select('*')),
+    }

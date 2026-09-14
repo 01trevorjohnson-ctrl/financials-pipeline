@@ -88,6 +88,31 @@
   <section class="budget-panel">
     <div class="budget-panel-head">
       <div class="budget-panel-title">
+        {{ icons.icon_review('budget-panel-icon') }}
+        <span>Statements needed</span>
+      </div>
+    </div>
+    <p class="budget-note-summary">{{ coverage_headline }}</p>
+    <ul class="coverage-list">
+      {% for c in account_coverage %}
+        <li class="coverage-item {{ 'is-overdue' if c.overdue else 'is-ok' }}">
+          {% if c.overdue %}
+            {{ icons.icon_checkbox_empty('coverage-checkbox') }}
+          {% else %}
+            {{ icons.icon_checkbox_checked('coverage-checkbox') }}
+          {% endif %}
+          <span class="coverage-account">{{ c.account }}</span>
+          <span class="coverage-meta">
+            {% if c.latest_period %}through {{ c.latest_period }}{% else %}no statement yet{% endif %}
+          </span>
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  <section class="budget-panel">
+    <div class="budget-panel-head">
+      <div class="budget-panel-title">
         {{ icons.icon_run('budget-panel-icon') }}
         <span>Pipeline</span>
       </div>
@@ -101,6 +126,22 @@
         Run Pipeline Now
       </button>
     </form>
+  </section>
+
+  <section class="budget-panel">
+    <div class="budget-panel-head">
+      <div class="budget-panel-title">
+        {{ icons.icon_download('budget-panel-icon') }}
+        <span>Export data</span>
+      </div>
+    </div>
+    <p class="budget-note-summary">
+      Download the full ledger to use elsewhere -- a spreadsheet, or uploaded to an LLM for
+      deeper analysis.
+    </p>
+    <a href="/export" class="budget-primary-btn" style="background: var(--bud-accent); text-align: center; text-decoration: none; display: block;">
+      Export data
+    </a>
   </section>
 
 {% endblock %}

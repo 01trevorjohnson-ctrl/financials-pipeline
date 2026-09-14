@@ -17,15 +17,19 @@ from __future__ import annotations
 import hashlib
 import os
 
+import datetime
+
 from fastapi import FastAPI, Request, Form
-from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi.responses import RedirectResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.staticfiles import StaticFiles
 
 from . import ask as ask_backend
 from . import colors
+from . import coverage as coverage_backend
 from . import db
+from . import export as export_backend
 from pipeline.main import run_pipeline
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -100,13 +104,18 @@ def home(request: Request):
     last_activity = db.get_last_pipeline_activity(client)
     open_review_count = db.get_open_needs_review_count(client)
 
+    account_coverage = coverage_backend.get_account_coverage(client)
+    coverage_headline = coverage_backend.llm_headline(account_coverage)
+
     # A just-triggered run's result, stashed in the session by /run-pipeline
     # (redirect-with-flash-message pattern) -- shown once, then cleared.
     run_flash = request.session.pop('last_run_result', None)
 
     return templates.TemplateResponse('home.html', {
         'request': request, 'last_activity': last_activity,
-        'open_review_count': open_review_count, 'run_flash': run_flash, 'active_tab': 'home',
+        'open_review_count': open_review_count, 'run_flash': run_flash,
+        'account_coverage': account_coverage, 'coverage_headline': coverage_headline,
+        'active_tab': 'home',
     })
 
 
@@ -240,6 +249,40 @@ def ask_submit(request: Request, question: str = Form(...)):
         'request': request, 'configured': True,
         'question': question, 'result': result, 'error': error, 'active_tab': 'ask',
     })
+
+
+@app.get('/export', response_class=HTMLResponse)
+def export_page(request: Request):
+    if not require_auth(request):
+        return RedirectResponse('/login', status_code=302)
+
+    return templates.TemplateResponse('export.html', {'request': request, 'active_tab': None})
+
+
+@app.get('/export/transactions.csv')
+def export_transactions_csv(request: Request):
+    if not require_auth(request):
+        return RedirectResponse('/login', status_code=302)
+
+    client = db.get_client()
+    rows = db.get_all_transactions_for_export(client)
+    csv_text = export_backend.transactions_csv(rows)
+    filename = f'transactions-{datetime.date.today().isoformat()}.csv'
+    return Response(content=csv_text, media_type='text/csv',
+                     headers={'Content-Disposition': f'attachment; filename="{filename}"'})
+
+
+@app.get('/export/full.json')
+def export_full_json(request: Request):
+    if not require_auth(request):
+        return RedirectResponse('/login', status_code=302)
+
+    client = db.get_client()
+    bundle = db.get_full_export_bundle(client)
+    json_text = export_backend.full_bundle_json(bundle)
+    filename = f'financials-export-{datetime.date.today().isoformat()}.json'
+    return Response(content=json_text, media_type='application/json',
+                     headers={'Content-Disposition': f'attachment; filename="{filename}"'})
 
 
 @app.get('/healthz')

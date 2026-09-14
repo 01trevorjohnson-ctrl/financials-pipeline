@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}Export - Household Finances{% endblock %}
+{% block header_title %}Export{% endblock %}
+{% block content %}
+
+  <a href="/home" class="export-back-link">&larr; Back to Home</a>
+
+  <section class="budget-panel">
+    <div class="budget-panel-head">
+      <div class="budget-panel-title">
+        {{ icons.icon_download('budget-panel-icon') }}
+        <span>Transactions (CSV)</span>
+      </div>
+    </div>
+    <p class="budget-note-summary">
+      Every transaction, one row each, in the same shape as the household's old Excel ledger --
+      date, merchant, amount, category, and the rest. Opens in any spreadsheet app, and is the
+      most broadly compatible format for uploading into an LLM (Claude, ChatGPT, etc.) to ask
+      deeper questions or build your own analysis.
+    </p>
+    <a href="/export/transactions.csv" class="budget-primary-btn" style="background: var(--bud-accent); text-align: center; text-decoration: none; display: block;">
+      Download transactions.csv
+    </a>
+  </section>
+
+  <section class="budget-panel">
+    <div class="budget-panel-head">
+      <div class="budget-panel-title">
+        {{ icons.icon_download('budget-panel-icon') }}
+        <span>Full data (JSON)</span>
+      </div>
+    </div>
+    <p class="budget-note-summary">
+      A complete snapshot of every table this app reads from -- accounts, category rules,
+      processed statements, transactions, review items, assets/liabilities, and paychecks --
+      as one JSON file. Best for a full backup, or for handing an LLM the whole dataset at once
+      rather than just the transaction ledger.
+    </p>
+    <a href="/export/full.json" class="budget-primary-btn" style="background: var(--bud-accent); text-align: center; text-decoration: none; display: block;">
+      Download full.json
+    </a>
+  </section>
+
+{% endblock %}
