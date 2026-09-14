@@ -5,26 +5,35 @@ with google-api-python-client + google-auth.
 
 Folder layout (see README.md for the full picture):
   root "Johnson Suarez Financials"                       -- new drops land here
-    "Raw Originals (Archived)"                            -- untouched copies
-    "Source Documents (Standardized Names)"                -- renamed copies
+    "Raw Originals (Archived)"                            -- historical only, see below
+    "Source Documents (Standardized Names)"                -- renamed originals land here
+
+IMPORTANT PLATFORM LIMITATION -- there is no automated write into "Raw
+Originals (Archived)": Google Drive service accounts get ZERO storage quota
+on a personal (non-Workspace) Drive, and creating ANY new file content --
+files().copy(), files().create() with media, any upload -- fails with a 403
+`storageQuotaExceeded` ("Service Accounts do not have storage quota"),
+unconditionally, no matter which folder it targets. Google's own suggested
+fixes (Shared Drives, domain-wide delegation) both require Google Workspace,
+which this account doesn't have. The ONLY Drive writes a service account can
+do here are metadata-only ones that touch zero new bytes: move (change
+parents) and rename. So the pipeline does a single move+rename of the
+original file straight into "Source Documents (Standardized Names)" -- see
+move_and_rename_to_standardized() -- and does not duplicate it into "Raw
+Originals (Archived)". That folder holds only what was filed there by hand
+before this pipeline existed. If a genuine byte-identical archived copy ever
+matters, the practical options are: upgrade to Google Workspace (unlocks
+Shared Drives, which pool storage instead of relying on a user's/service
+account's own quota), or have a human periodically copy files themselves.
 
 The root folder id and the "Source Documents" folder id are known and
 configurable via env vars (with the household's actual values as defaults).
-The "Raw Originals (Archived)" folder id is resolved BY NAME under the root
-at runtime and cached for the life of the process -- this was deliberate:
-at dev time the read-only Drive inspection MCP connector available to this
-coding session had a stale/empty search index for this folder (a known lag
-issue called out in the task brief), so its id could not be read directly.
-Resolving by name at runtime sidesteps that entirely and is arguably more
-robust than hardcoding an id anyway (it keeps working if the folder is ever
-recreated). Set GOOGLE_DRIVE_RAW_ORIGINALS_FOLDER_ID to skip the lookup.
 """
 from __future__ import annotations
 
 import io
 import json
 import os
-from typing import Optional
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -35,8 +44,6 @@ SCOPES = ['https://www.googleapis.com/auth/drive']
 ROOT_FOLDER_ID = os.environ.get('GOOGLE_DRIVE_ROOT_FOLDER_ID', '1Vdnu5u9doehcyNdNZJLxvD7OTaYSPx8a')
 STANDARDIZED_FOLDER_ID = os.environ.get(
     'GOOGLE_DRIVE_STANDARDIZED_FOLDER_ID', '15bTjig6O9mUQ8TZ5jV1avfHSDA2LJl5r')
-RAW_ORIGINALS_FOLDER_NAME = 'Raw Originals (Archived)'
-_raw_originals_folder_id_cache: Optional[str] = None
 
 
 def get_service():
@@ -48,26 +55,6 @@ def get_service():
     info = json.loads(raw_key)
     creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     return build('drive', 'v3', credentials=creds, cache_discovery=False)
-
-
-def get_raw_originals_folder_id(service) -> str:
-    global _raw_originals_folder_id_cache
-    env_override = os.environ.get('GOOGLE_DRIVE_RAW_ORIGINALS_FOLDER_ID')
-    if env_override:
-        return env_override
-    if _raw_originals_folder_id_cache:
-        return _raw_originals_folder_id_cache
-
-    q = (f"'{ROOT_FOLDER_ID}' in parents and mimeType = 'application/vnd.google-apps.folder' "
-         f"and name = '{RAW_ORIGINALS_FOLDER_NAME}' and trashed = false")
-    resp = service.files().list(q=q, fields='files(id, name)', pageSize=5).execute()
-    files = resp.get('files', [])
-    if not files:
-        raise RuntimeError(
-            f'Could not find a "{RAW_ORIGINALS_FOLDER_NAME}" subfolder under the root Drive '
-            'folder. Confirm it exists and the service account has access to it.')
-    _raw_originals_folder_id_cache = files[0]['id']
-    return _raw_originals_folder_id_cache
 
 
 def list_root_files(service) -> list:
@@ -95,15 +82,6 @@ def download_file(service, file_id: str) -> bytes:
     while not done:
         _status, done = downloader.next_chunk()
     return buf.getvalue()
-
-
-def copy_to_raw_originals(service, file_id: str, original_filename: str) -> str:
-    """Copy the original (untouched, under its original name) into
-    "Raw Originals (Archived)". Returns the new file's id."""
-    raw_folder_id = get_raw_originals_folder_id(service)
-    body = {'name': original_filename, 'parents': [raw_folder_id]}
-    copied = service.files().copy(fileId=file_id, body=body, fields='id').execute()
-    return copied['id']
 
 
 def move_and_rename_to_standardized(service, file_id: str, standardized_filename: str) -> None:

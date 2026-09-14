@@ -21,11 +21,13 @@ which of the known account formats it matches, parse it, reconcile the
 parsed transactions against the statement's own printed totals, categorize
 every row against ``category_keys`` (+ the special cases in
 ``categorize.py``), write ``processed_statements``/``transactions``/
-``needs_review`` rows, then archive the original into "Raw Originals
-(Archived)" and move+rename it into "Source Documents (Standardized
-Names)". A file that fails to reconcile, fails to parse, or matches no
-known format is left exactly where it was dropped (Drive root) so a human
-notices it -- it is never guessed at.
+``needs_review`` rows, then move+rename it into "Source Documents
+(Standardized Names)" (there is no automated copy into "Raw Originals
+(Archived)" -- see the note above ``move_and_rename_to_standardized``'s call
+site for why: Drive service accounts cannot create new file content on a
+personal Drive at all). A file that fails to reconcile, fails to parse, or
+matches no known format is left exactly where it was dropped (Drive root) so
+a human notices it -- it is never guessed at.
 
 See README.md for the full policy writeup and required environment
 variables.
@@ -257,15 +259,25 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
         logger.info('Queued %d needs_review rows ($%.2f uncategorized total)',
                     needs_review_queued, total_uncategorized)
 
-    # ---- archive in Drive ----------------------------------------------------
+    # ---- move + rename in Drive ------------------------------------------------
+    # NOT a copy-then-move: Google Drive service accounts have zero storage
+    # quota on a personal (non-Workspace) Drive and cannot create ANY new file
+    # content -- files().copy() (and any upload) fails with 403
+    # storageQuotaExceeded, unconditionally, regardless of which folder it
+    # targets. There is no per-request workaround; Google's own fix for this
+    # is Shared Drives or domain-wide delegation, both Workspace-only features
+    # this account doesn't have. So there is no automated "Raw Originals
+    # (Archived)" duplicate for pipeline-processed files -- only a single
+    # move+rename into "Source Documents (Standardized Names)", which is a
+    # pure metadata operation (addParents/removeParents/rename) and needs no
+    # quota. See README.md for the full explanation.
     drive_warning = None
     try:
-        drive_client.copy_to_raw_originals(drive_service, file_id, original_filename)
         drive_client.move_and_rename_to_standardized(drive_service, file_id, standardized_name)
-        logger.info('Archived + renamed in Drive: "%s" -> "%s"', original_filename, standardized_name)
+        logger.info('Moved + renamed in Drive: "%s" -> "%s"', original_filename, standardized_name)
     except Exception as e:
         drive_warning = (
-            f'DB writes for {original_filename} succeeded, but Drive archive/rename failed: {e}. '
+            f'DB writes for {original_filename} succeeded, but the Drive move/rename failed: {e}. '
             'The file remains in the root folder; processed_statements already shows it as '
             'processed, so re-running the pipeline will NOT reprocess it. Move/rename it manually '
             'in Drive, or clear its processed_statements row to retry.')

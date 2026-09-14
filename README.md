@@ -136,10 +136,28 @@ contract (see section 1).
    `pipeline/categorize.py`.
 8. On success: inserts `processed_statements` (`status='processed'`), all
    `transactions` rows (with `statement_id` set), any `needs_review` rows;
-   then in Drive, copies the original into **"Raw Originals (Archived)"**
-   under its original name, and moves+renames the original (now in root)
-   into **"Source Documents (Standardized Names)"**, e.g.
-   `"2026-05 - AMEX ConnectMiles (...4473) statement.csv"`.
+   then in Drive, moves+renames the original (now in root) into
+   **"Source Documents (Standardized Names)"**, e.g.
+   `"2026-05 - AMEX ConnectMiles (...4473) statement.csv"`. There is no
+   automated copy into "Raw Originals (Archived)" -- see the platform
+   limitation below.
+
+### Platform limitation: no automated "Raw Originals (Archived)" copy
+
+Google Drive service accounts have **zero storage quota** on a personal
+(non-Workspace) Drive. Creating any new file content -- `files().copy()`,
+any upload -- fails with a 403 `storageQuotaExceeded` ("Service Accounts do
+not have storage quota"), no matter which folder it targets. This isn't
+something a request parameter can work around; Google's own suggested fixes
+(Shared Drives, domain-wide delegation) both require Google Workspace, which
+this account doesn't have. The only Drive writes a service account *can* do
+here are metadata-only (move/rename), which is why the pipeline does a
+single move+rename straight into "Source Documents (Standardized Names)" and
+does not also duplicate the file into "Raw Originals (Archived)" -- that
+folder only holds what was filed there by hand before this pipeline existed.
+If a genuine byte-identical archived copy ever matters, the options are:
+upgrade to Google Workspace (Shared Drives pool storage instead of relying
+on any one account's quota), or copy files by hand occasionally.
 
 `run_pipeline()` (in `pipeline/main.py`) contains all of the above and
 returns a `PipelineRunResult` (files found/processed/skipped/failed,
@@ -367,7 +385,6 @@ git push -u origin main
 | pipeline | `GOOGLE_SERVICE_ACCOUNT_KEY` | The full contents of the service-account JSON key file you already downloaded from Google Cloud Console (IAM & Admin -> Service Accounts -> your account -> Keys), pasted as a single-line string value. |
 | pipeline | `GOOGLE_DRIVE_ROOT_FOLDER_ID` *(optional)* | Defaults to `1Vdnu5u9doehcyNdNZJLxvD7OTaYSPx8a` (the "Johnson Suarez Financials" folder). Only set this if the folder ever changes. |
 | pipeline | `GOOGLE_DRIVE_STANDARDIZED_FOLDER_ID` *(optional)* | Defaults to `15bTjig6O9mUQ8TZ5jV1avfHSDA2LJl5r` ("Source Documents (Standardized Names)"). |
-| pipeline | `GOOGLE_DRIVE_RAW_ORIGINALS_FOLDER_ID` *(optional)* | Normally left unset -- the pipeline resolves "Raw Originals (Archived)" by name under the root folder automatically and caches it. Set this only if you want to skip that lookup or the folder is ever renamed. |
 | dashboard | `SUPABASE_URL` | Same as above. |
 | dashboard | `SUPABASE_SERVICE_KEY` | Same `service_role` key as the pipeline (see "why the dashboard prefers the service key" above). Server-side only. |
 | dashboard | `SUPABASE_ANON_KEY` *(optional, forward-looking)* | Same API settings page -> **Project API keys -> `anon` `public`**. Currently unused unless `SUPABASE_SERVICE_KEY` is absent (see above); set it anyway so it's ready once real Supabase Auth is added. |
@@ -441,14 +458,15 @@ confirm.
 
 - **RLS + anon key**: see "why the dashboard prefers the service key"
   above -- a real, load-bearing deviation, not cosmetic.
-- **"Raw Originals (Archived)" folder id**: not hardcoded. The read-only
-  Drive inspection tool available while building this had a stale/empty
-  search index for this specific folder (a known lag issue, not a real
-  absence of the folder). Rather than guess at an id, `drive_client.py`
-  resolves it **by name** under the root folder at runtime and caches it --
-  arguably more robust than a hardcoded id anyway. Override with
-  `GOOGLE_DRIVE_RAW_ORIGINALS_FOLDER_ID` if you ever want to skip the
-  lookup.
+- **"Raw Originals (Archived)" is no longer written to automatically**: the
+  initial version of this pipeline tried to copy each original into that
+  folder before moving/renaming it. In production this failed every time
+  with a 403 `storageQuotaExceeded` -- Drive service accounts have no
+  storage quota on a personal (non-Workspace) Drive, so they cannot create
+  *any* new file content, and the copy's failure was also silently blocking
+  the (unrelated, quota-free) move+rename from ever running, since both were
+  wrapped in one try/except. Fixed by dropping the copy entirely and doing
+  only the move+rename -- see the "Platform limitation" section above.
 - **Standardized filename for a statement covering more than one account**:
   Capital One 360 (Checking+Savings in one PDF) and Panama Mastercard
   (primary ...2849 + supplementary ...3029 in one CSV) each span two
