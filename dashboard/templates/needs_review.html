@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Needs Review - Household Finances{% endblock %}
+{% block content %}
+  <h1>Needs Review</h1>
+  {% if not items %}
+    <p class="muted">Nothing open. Nice.</p>
+  {% endif %}
+  {% for item in items %}
+    <div class="review-card">
+      <div class="review-merchant">{{ item.merchant or "(no merchant)" }}</div>
+      <div class="review-desc">{{ item.description or "" }}</div>
+      <div class="review-meta">
+        {% if item.amount is not none %}<span>${{ "%.2f"|format(item.amount) }}</span>{% endif %}
+        <span class="muted">{{ item.reason }}</span>
+      </div>
+      <form method="post" action="/needs-review/{{ item.id }}/resolve" class="review-form">
+        <select name="category" required>
+          <option value="" disabled selected>Assign category...</option>
+          {% for c in categories %}
+            <option value="{{ c }}">{{ c }}</option>
+          {% endfor %}
+        </select>
+        <button type="submit">Resolve</button>
+      </form>
+    </div>
+  {% endfor %}
+{% endblock %}

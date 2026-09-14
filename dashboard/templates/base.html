@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Household Finances{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <nav class="topnav">
+    <a href="/summary" class="brand">Finances</a>
+    <a href="/summary">Summary</a>
+    <a href="/needs-review">Review</a>
+    <a href="/assets">Assets</a>
+    <a href="/logout" class="logout">Log out</a>
+  </nav>
+  <main class="content">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
