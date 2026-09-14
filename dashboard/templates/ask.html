@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}Ask - Household Finances{% endblock %}
+{% block header_title %}Ask{% endblock %}
+{% block content %}
+
+  <section class="budget-panel">
+    <div class="budget-panel-head">
+      <div class="budget-panel-title">
+        {{ icons.icon_ask('budget-panel-icon') }}
+        <span>Ask about your finances</span>
+      </div>
+    </div>
+
+    {% if not configured %}
+      <p class="budget-note-summary">
+        Ask isn't configured yet &mdash; set <code>ANTHROPIC_API_KEY</code> on the dashboard
+        service in Railway to turn this on.
+      </p>
+    {% else %}
+      <p class="budget-note-summary">
+        e.g. "how much did we spend on Delivery in July?" or "what's our biggest category this month?"
+      </p>
+      <form method="post" action="/ask" class="ask-form">
+        <input type="text" name="question" class="budget-note-input" placeholder="Ask a question&hellip;"
+               value="{{ question or '' }}" autofocus required>
+        <button type="submit" class="budget-primary-btn" style="background: var(--bud-accent);">Ask</button>
+      </form>
+    {% endif %}
+  </section>
+
+  {% if error %}
+    <section class="budget-panel">
+      <p class="budget-error">{{ error }}</p>
+    </section>
+  {% endif %}
+
+  {% if result %}
+    <section class="budget-panel ask-answer">
+      <div class="budget-panel-head">
+        <div class="budget-panel-title">
+          {{ icons.icon_check('budget-panel-icon icon-ok') }}
+          <span>Answer</span>
+        </div>
+      </div>
+      <p class="ask-answer-text">{{ result.answer }}</p>
+
+      <div class="ask-data">
+        {% if result.data.breakdown %}
+          <table class="ask-table">
+            <tbody>
+              {% for key, value in result.data.breakdown.items() %}
+                <tr>
+                  <td>{{ key }}</td>
+                  <td class="num">${{ "{:,.2f}".format(value) }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% else %}
+          <div class="stat-row">
+            <div class="stat-tile">
+              <div class="stat-label">{{ result.spec.metric|capitalize }}</div>
+              <div class="stat-value">${{ "{:,.2f}".format(result.data.total) }}</div>
+            </div>
+            <div class="stat-tile">
+              <div class="stat-label">Transactions</div>
+              <div class="stat-value">{{ result.data.transaction_count }}</div>
+            </div>
+          </div>
+        {% endif %}
+        <p class="budget-settings-hint ask-spec">
+          {% if result.spec.date_from or result.spec.date_to %}
+            {{ result.spec.date_from or '…' }} &rarr; {{ result.spec.date_to or '…' }} &middot;
+          {% endif %}
+          {% if result.spec.categories %}{{ result.spec.categories|join(', ') }} &middot;{% endif %}
+          {% if result.spec.flow %}flow: {{ result.spec.flow }} &middot;{% endif %}
+          {{ result.data.transaction_count }} matching row(s)
+        </p>
+      </div>
+    </section>
+  {% endif %}
+
+{% endblock %}

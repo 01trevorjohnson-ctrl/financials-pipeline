@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime
 import re
 
-import accounts
+from .. import accounts
 from .common import MON, AMT_RE, money, ParseResult, TxnRow, pdf_text, RECONCILE_TOLERANCE
 
 ACCOUNT_NAME = accounts.CAPONE_QUICKSILVER

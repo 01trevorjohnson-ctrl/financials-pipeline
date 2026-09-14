@@ -20,7 +20,7 @@ import datetime
 import io
 import re
 
-import accounts
+from .. import accounts
 from .common import ParseResult, TxnRow, sniff_text
 
 ACCOUNT_NAME = accounts.ROBINHOOD_SPENDING

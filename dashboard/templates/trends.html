@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}Trends - Household Finances{% endblock %}
+{% block header_title %}Trends{% endblock %}
+{% block content %}
+
+  <section class="budget-panel">
+    <div class="budget-panel-head">
+      <div class="budget-panel-title">
+        {{ icons.icon_trends('budget-panel-icon') }}
+        <span>Spend by month</span>
+      </div>
+    </div>
+    {% if not series %}
+      <p class="budget-note-summary">No spend data yet.</p>
+    {% else %}
+      <div class="trends-chart-wrap">
+        <canvas id="trendsChart" height="260"></canvas>
+      </div>
+    {% endif %}
+  </section>
+
+  {% if series %}
+    <section class="budget-panel">
+      <div class="budget-panel-head">
+        <div class="budget-panel-title">Categories</div>
+      </div>
+      <div class="trends-cat-list">
+        {% for s in series %}
+          <label class="trends-cat-row">
+            <span class="trends-cat-swatch" style="background: {{ s.color }};"></span>
+            <input type="checkbox" data-idx="{{ loop.index0 }}" class="trends-cat-checkbox" {{ 'checked' if s.default_on else '' }}>
+            <span class="trends-cat-name">{{ s.category }}</span>
+            <span class="trends-cat-total">${{ "{:,.0f}".format(s.total) }}</span>
+          </label>
+        {% endfor %}
+      </div>
+    </section>
+  {% endif %}
+
+{% endblock %}
+
+{% block scripts %}
+{% if series %}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js"></script>
+<script>
+(function () {
+  var monthLabels = {{ month_labels|tojson }};
+  var series = {{ series|tojson }};
+
+  var isDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  var gridColor = isDark ? 'rgba(255,255,255,0.12)' : 'rgba(36,31,51,0.09)';
+  var tickColor = isDark ? '#a89fc2' : '#6b6580';
+
+  var datasets = series.map(function (s) {
+    return {
+      label: s.category,
+      data: s.data,
+      borderColor: s.color,
+      backgroundColor: s.color,
+      pointRadius: 2,
+      pointHoverRadius: 4,
+      borderWidth: 2,
+      tension: 0.3,
+      hidden: !s.default_on,
+    };
+  });
+
+  var ctx = document.getElementById('trendsChart').getContext('2d');
+  var chart = new Chart(ctx, {
+    type: 'line',
+    data: { labels: monthLabels, datasets: datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: function (item) {
+              return item.dataset.label + ': $' + item.formattedValue;
+            },
+          },
+        },
+      },
+      scales: {
+        x: { grid: { color: gridColor }, ticks: { color: tickColor } },
+        y: {
+          grid: { color: gridColor },
+          ticks: { color: tickColor, callback: function (v) { return '$' + v; } },
+        },
+      },
+    },
+  });
+
+  document.querySelectorAll('.trends-cat-checkbox').forEach(function (box) {
+    box.addEventListener('change', function () {
+      var idx = parseInt(box.getAttribute('data-idx'), 10);
+      chart.setDatasetVisibility(idx, box.checked);
+      chart.update();
+    });
+  });
+})();
+</script>
+{% endif %}
+{% endblock %}

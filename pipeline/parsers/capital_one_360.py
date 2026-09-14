@@ -12,7 +12,7 @@ from __future__ import annotations
 import datetime
 import re
 
-import accounts
+from .. import accounts
 from .common import MON, money, ParseResult, TxnRow, pdf_text, RECONCILE_TOLERANCE
 
 ROW_RE = re.compile(

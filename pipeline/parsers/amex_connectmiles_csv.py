@@ -13,7 +13,7 @@ from __future__ import annotations
 import datetime
 import re
 
-import accounts
+from .. import accounts
 from .common import num, ParseResult, TxnRow, csv_rows, RECONCILE_TOLERANCE
 
 ACCOUNT_NAME = accounts.AMEX_CONNECTMILES

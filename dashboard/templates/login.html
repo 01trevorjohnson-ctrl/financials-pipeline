@@ -4,17 +4,31 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Household Finances - Log in</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
 </head>
-<body class="login-body">
-  <main class="login-card">
-    <h1>Household Finances</h1>
-    {% if error %}<p class="error">{{ error }}</p>{% endif %}
-    <form method="post" action="/login">
-      <label for="password">Password</label>
-      <input type="password" id="password" name="password" autofocus required>
-      <button type="submit">Log in</button>
-    </form>
-  </main>
+<body>
+  <div class="budget-shell">
+    <div class="budget-blob budget-blob-a"></div>
+    <div class="budget-blob budget-blob-b"></div>
+    <div class="budget-blob budget-blob-c"></div>
+    <div class="budget-stars"></div>
+
+    <div class="login-content">
+      <div class="login-panel budget-content">
+        <div class="budget-panel">
+          <p class="budget-eyebrow">Johnson &middot; Suarez</p>
+          <h1 class="budget-title">Household Finances</h1>
+          {% if error %}<p class="budget-error">{{ error }}</p>{% endif %}
+          <form method="post" action="/login" class="login-form">
+            <input type="password" id="password" name="password" placeholder="Password" autofocus required class="budget-note-input">
+            <button type="submit" class="budget-primary-btn" style="background: var(--bud-accent);">Log in</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
 </body>
 </html>

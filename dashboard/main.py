@@ -1,28 +1,38 @@
-"""Household finance dashboard -- minimal FastAPI app, mobile-first plain
-HTML/CSS, gated behind a single shared password (DASHBOARD_PASSWORD) via a
-signed session cookie. Three pages: Summary (Flow + Category totals),
-Needs Review (resolve queued transactions), and Assets & Liabilities
-(read-only). See README.md for deployment + env vars.
+"""Household finance dashboard -- FastAPI + Jinja2, gated behind a single
+shared password (DASHBOARD_PASSWORD) via a signed session cookie.
+
+Four pages behind a bottom tab bar: Home (status + "Run Pipeline Now"),
+Review (the needs_review flow), Trends (month-by-category spend chart), and
+Ask (plain-English Q&A backed by the Claude API). See README.md for the
+full page list, deployment, and env vars.
 
 This is a long-running web service (unlike the pipeline, which is a cron
-job) -- Railway should run it as a normal Web Service, not a Cron Job.
+job) -- Railway should run it as a normal Web Service, not a Cron Job. As
+of this version it ALSO imports and can invoke the pipeline package
+directly (see /run-pipeline below), which is why GOOGLE_SERVICE_ACCOUNT_KEY
+must now be set on this service too, not just the pipeline's.
 """
 from __future__ import annotations
 
 import hashlib
 import os
-from datetime import datetime, timezone
 
-from fastapi import FastAPI, Request, Form, Depends
+from fastapi import FastAPI, Request, Form
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.staticfiles import StaticFiles
 
-import db
+from . import ask as ask_backend
+from . import colors
+from . import db
+from pipeline.main import run_pipeline
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 templates = Jinja2Templates(directory=os.path.join(APP_DIR, 'templates'))
+templates.env.globals['category_color'] = colors.get_category_color
+templates.env.globals['FINANCES_COLOR'] = colors.FINANCES_COLOR
+templates.env.globals['SAVINGS_COLOR'] = colors.SAVINGS_COLOR
 
 DASHBOARD_PASSWORD = os.environ.get('DASHBOARD_PASSWORD')
 # A dedicated session secret is preferred (set SESSION_SECRET in Railway),
@@ -49,7 +59,7 @@ def require_auth(request: Request):
 @app.get('/login', response_class=HTMLResponse)
 def login_form(request: Request):
     if request.session.get('authenticated'):
-        return RedirectResponse('/summary', status_code=302)
+        return RedirectResponse('/home', status_code=302)
     return templates.TemplateResponse('login.html', {'request': request, 'error': None})
 
 
@@ -62,7 +72,7 @@ def login_submit(request: Request, password: str = Form(...)):
             status_code=500)
     if password == DASHBOARD_PASSWORD:
         request.session['authenticated'] = True
-        return RedirectResponse('/summary', status_code=302)
+        return RedirectResponse('/home', status_code=302)
     return templates.TemplateResponse('login.html', {'request': request, 'error': 'Wrong password.'},
                                        status_code=401)
 
@@ -75,126 +85,160 @@ def logout(request: Request):
 
 @app.get('/')
 def root(request: Request):
-    return RedirectResponse('/summary', status_code=302)
+    return RedirectResponse('/home', status_code=302)
 
 
 # ---------------------------------------------------------------------------
-# Summary: Flow + Category totals
+# Home: status summary + "Run Pipeline Now"
 # ---------------------------------------------------------------------------
-@app.get('/summary', response_class=HTMLResponse)
-def summary(request: Request):
+@app.get('/home', response_class=HTMLResponse)
+def home(request: Request):
     if not require_auth(request):
         return RedirectResponse('/login', status_code=302)
 
     client = db.get_client()
-    # Pull the columns we need for aggregation. Financial history here is a
-    # couple thousand rows at most, so a client-side groupby is simpler and
-    # plenty fast -- no need for a Postgres RPC/view.
-    resp = client.table('transactions').select('amount, flow, category, date').execute()
-    rows = resp.data or []
+    last_activity = db.get_last_pipeline_activity(client)
+    open_review_count = db.get_open_needs_review_count(client)
 
-    flow_totals = {}
-    category_totals = {}
-    for r in rows:
-        amt = r.get('amount') or 0
-        flow = r.get('flow') or 'Unknown'
-        cat = r.get('category') or 'Unknown'
-        f = flow_totals.setdefault(flow, {'rows': 0, 'sum': 0.0})
-        f['rows'] += 1
-        f['sum'] += amt
-        c = category_totals.setdefault(cat, {'rows': 0, 'sum': 0.0, 'flow': flow})
-        c['rows'] += 1
-        c['sum'] += amt
+    # A just-triggered run's result, stashed in the session by /run-pipeline
+    # (redirect-with-flash-message pattern) -- shown once, then cleared.
+    run_flash = request.session.pop('last_run_result', None)
 
-    flow_list = sorted(flow_totals.items(), key=lambda kv: -kv[1]['sum'])
-    category_list = sorted(category_totals.items(), key=lambda kv: -abs(kv[1]['sum']))
-
-    total_spend = flow_totals.get('Spend', {}).get('sum', 0.0)
-    total_income = -flow_totals.get('Income', {}).get('sum', 0.0)
-
-    return templates.TemplateResponse('summary.html', {
-        'request': request, 'flow_list': flow_list, 'category_list': category_list,
-        'total_spend': total_spend, 'total_income': total_income, 'row_count': len(rows),
+    return templates.TemplateResponse('home.html', {
+        'request': request, 'last_activity': last_activity,
+        'open_review_count': open_review_count, 'run_flash': run_flash, 'active_tab': 'home',
     })
 
 
+@app.post('/run-pipeline')
+def run_pipeline_now(request: Request):
+    if not require_auth(request):
+        return RedirectResponse('/login', status_code=302)
+
+    try:
+        result = run_pipeline()
+        flash = {
+            'ok': result.ok,
+            'started_at': result.started_at.isoformat(timespec='seconds'),
+            'finished_at': result.finished_at.isoformat(timespec='seconds'),
+            'files_found': result.files_found,
+            'files_processed': result.files_processed,
+            'files_skipped': result.files_skipped,
+            'transactions_inserted': result.total_transactions_inserted,
+            'needs_review_queued': result.total_needs_review_queued,
+            'unexpected_errors': result.unexpected_errors,
+            'failed': [{'filename': f.filename, 'detail': f.detail} for f in result.files_failed],
+        }
+    except Exception as e:
+        flash = {
+            'ok': False, 'crashed': True, 'error': str(e),
+            'started_at': None, 'finished_at': None, 'files_found': 0, 'files_processed': 0,
+            'files_skipped': 0, 'transactions_inserted': 0, 'needs_review_queued': 0,
+            'unexpected_errors': 1, 'failed': [],
+        }
+
+    request.session['last_run_result'] = flash
+    return RedirectResponse('/home', status_code=302)
+
+
 # ---------------------------------------------------------------------------
-# Needs Review
+# Needs Review: resolve flagged transactions (route path kept as
+# /needs-review; only the nav label/styling changed to "Review")
 # ---------------------------------------------------------------------------
 @app.get('/needs-review', response_class=HTMLResponse)
-def needs_review_list(request: Request):
+def review_list(request: Request):
     if not require_auth(request):
         return RedirectResponse('/login', status_code=302)
 
     client = db.get_client()
-    resp = (client.table('needs_review').select('*')
-            .eq('status', 'open').order('created_at', desc=True).execute())
-    items = resp.data or []
-
-    cats_resp = client.table('category_keys').select('category').eq('active', True).execute()
-    categories = sorted({r['category'] for r in (cats_resp.data or [])})
+    items = db.get_open_needs_review(client)
+    categories = db.get_active_categories(client)
 
     return templates.TemplateResponse('needs_review.html', {
-        'request': request, 'items': items, 'categories': categories,
+        'request': request, 'items': items, 'categories': categories, 'active_tab': 'review',
     })
 
 
 @app.post('/needs-review/{review_id}/resolve')
-def needs_review_resolve(request: Request, review_id: str, category: str = Form(...)):
+def review_resolve(request: Request, review_id: str, category: str = Form(...)):
     if not require_auth(request):
         return RedirectResponse('/login', status_code=302)
 
     client = db.get_client()
-    review_resp = client.table('needs_review').select('*').eq('id', review_id).limit(1).execute()
-    review_rows = review_resp.data or []
-    if not review_rows:
-        return RedirectResponse('/needs-review', status_code=302)
-    review = review_rows[0]
-
-    # Look up the flow that goes with this category from category_keys, so
-    # we don't leave a stale/mismatched flow on the transaction.
-    flow = None
-    ck_resp = (client.table('category_keys').select('flow').eq('category', category)
-               .limit(1).execute())
-    if ck_resp.data:
-        flow = ck_resp.data[0]['flow']
-
-    if review.get('transaction_id'):
-        update = {'category': category}
-        if flow:
-            update['flow'] = flow
-        client.table('transactions').update(update).eq('id', review['transaction_id']).execute()
-
-    client.table('needs_review').update({
-        'status': 'resolved',
-        'resolved_category': category,
-        'resolved_at': datetime.now(timezone.utc).isoformat(),
-    }).eq('id', review_id).execute()
-
+    db.resolve_needs_review(client, review_id, category)
     return RedirectResponse('/needs-review', status_code=302)
 
 
 # ---------------------------------------------------------------------------
-# Assets & Liabilities (read-only)
+# Trends: month x category spend
 # ---------------------------------------------------------------------------
-@app.get('/assets', response_class=HTMLResponse)
-def assets(request: Request):
+@app.get('/trends', response_class=HTMLResponse)
+def trends(request: Request):
     if not require_auth(request):
         return RedirectResponse('/login', status_code=302)
 
     client = db.get_client()
-    resp = client.table('assets_liabilities').select('*').order('as_of_date', desc=True).execute()
-    rows = resp.data or []
+    monthly_by_category = db.get_monthly_spend_by_category(client)
+    months = db.month_range(monthly_by_category)
+    default_categories = db.top_categories_by_total_spend(monthly_by_category, n=6)
+    all_categories = sorted(monthly_by_category.keys())
 
-    assets_rows = [r for r in rows if (r.get('item_type') or '').lower() != 'liability']
-    liability_rows = [r for r in rows if (r.get('item_type') or '').lower() == 'liability']
-    total_assets = sum(r.get('amount') or 0 for r in assets_rows)
-    total_liabilities = sum(r.get('amount') or 0 for r in liability_rows)
+    series = []
+    for cat in all_categories:
+        months_dict = monthly_by_category[cat]
+        series.append({
+            'category': cat,
+            'color': colors.get_category_color(cat),
+            'total': round(sum(months_dict.values()), 2),
+            'data': [round(months_dict.get(m, 0.0), 2) for m in months],
+            'default_on': cat in default_categories,
+        })
+    # Largest categories first in the checkbox list.
+    series.sort(key=lambda s: -s['total'])
 
-    return templates.TemplateResponse('assets.html', {
-        'request': request, 'assets_rows': assets_rows, 'liability_rows': liability_rows,
-        'total_assets': total_assets, 'total_liabilities': total_liabilities,
-        'net_worth': total_assets - total_liabilities,
+    return templates.TemplateResponse('trends.html', {
+        'request': request,
+        'months': months, 'month_labels': [db.month_label(m) for m in months],
+        'series': series, 'active_tab': 'trends',
+    })
+
+
+# ---------------------------------------------------------------------------
+# Ask: plain-English Q&A backed by the Claude API
+# ---------------------------------------------------------------------------
+@app.get('/ask', response_class=HTMLResponse)
+def ask_form(request: Request):
+    if not require_auth(request):
+        return RedirectResponse('/login', status_code=302)
+
+    return templates.TemplateResponse('ask.html', {
+        'request': request, 'configured': ask_backend.is_configured(),
+        'question': None, 'result': None, 'error': None, 'active_tab': 'ask',
+    })
+
+
+@app.post('/ask', response_class=HTMLResponse)
+def ask_submit(request: Request, question: str = Form(...)):
+    if not require_auth(request):
+        return RedirectResponse('/login', status_code=302)
+
+    if not ask_backend.is_configured():
+        return templates.TemplateResponse('ask.html', {
+            'request': request, 'configured': False,
+            'question': question, 'result': None, 'error': None, 'active_tab': 'ask',
+        })
+
+    error = None
+    result = None
+    try:
+        client = db.get_client()
+        result = ask_backend.answer_question(client, question)
+    except Exception as e:
+        error = f'Could not get an answer: {e}'
+
+    return templates.TemplateResponse('ask.html', {
+        'request': request, 'configured': True,
+        'question': question, 'result': result, 'error': error, 'active_tab': 'ask',
     })
 
 

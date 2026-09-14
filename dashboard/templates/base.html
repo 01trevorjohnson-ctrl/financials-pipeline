@@ -1,21 +1,57 @@
+{% import "_icons.html" as icons %}
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Household Finances{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@500;600;700&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <nav class="topnav">
-    <a href="/summary" class="brand">Finances</a>
-    <a href="/summary">Summary</a>
-    <a href="/needs-review">Review</a>
-    <a href="/assets">Assets</a>
-    <a href="/logout" class="logout">Log out</a>
-  </nav>
-  <main class="content">
-    {% block content %}{% endblock %}
-  </main>
+  <div class="budget-shell">
+    <div class="budget-blob budget-blob-a"></div>
+    <div class="budget-blob budget-blob-b"></div>
+    <div class="budget-blob budget-blob-c"></div>
+    <div class="budget-stars"></div>
+
+    <div class="budget-content page-content">
+      <header class="app-header">
+        <div>
+          <p class="budget-eyebrow">Johnson &middot; Suarez</p>
+          <h1 class="budget-title app-title">{% block header_title %}Finances{% endblock %}</h1>
+        </div>
+        <a href="/logout" class="budget-icon-btn" aria-label="Log out" title="Log out">
+          {{ icons.icon_logout('budget-panel-icon') }}
+        </a>
+      </header>
+
+      <main class="page-main">
+        {% block content %}{% endblock %}
+      </main>
+    </div>
+
+    <nav class="tabbar">
+      <a href="/home" class="tabbar-item {{ 'is-active' if active_tab == 'home' else '' }}">
+        {{ icons.icon_home('tabbar-icon') }}
+        <span>Home</span>
+      </a>
+      <a href="/needs-review" class="tabbar-item {{ 'is-active' if active_tab == 'review' else '' }}">
+        {{ icons.icon_review('tabbar-icon') }}
+        <span>Review</span>
+      </a>
+      <a href="/trends" class="tabbar-item {{ 'is-active' if active_tab == 'trends' else '' }}">
+        {{ icons.icon_trends('tabbar-icon') }}
+        <span>Trends</span>
+      </a>
+      <a href="/ask" class="tabbar-item {{ 'is-active' if active_tab == 'ask' else '' }}">
+        {{ icons.icon_ask('tabbar-icon') }}
+        <span>Ask</span>
+      </a>
+    </nav>
+  </div>
+  {% block scripts %}{% endblock %}
 </body>
 </html>

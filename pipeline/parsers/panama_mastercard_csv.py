@@ -16,7 +16,7 @@ from __future__ import annotations
 import datetime
 import re
 
-import accounts
+from .. import accounts
 from .common import num, clean_desc, ParseResult, TxnRow, csv_rows, RECONCILE_TOLERANCE
 
 HOLDER = 'Sandra Viviana Suarez Jimenez'

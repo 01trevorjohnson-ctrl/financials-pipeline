@@ -1,27 +1,37 @@
 {% extends "base.html" %}
-{% block title %}Needs Review - Household Finances{% endblock %}
+{% import "_icons.html" as icons %}
+{% block title %}Review - Household Finances{% endblock %}
+{% block header_title %}Review{% endblock %}
 {% block content %}
-  <h1>Needs Review</h1>
+
   {% if not items %}
-    <p class="muted">Nothing open. Nice.</p>
-  {% endif %}
-  {% for item in items %}
-    <div class="review-card">
-      <div class="review-merchant">{{ item.merchant or "(no merchant)" }}</div>
-      <div class="review-desc">{{ item.description or "" }}</div>
-      <div class="review-meta">
-        {% if item.amount is not none %}<span>${{ "%.2f"|format(item.amount) }}</span>{% endif %}
-        <span class="muted">{{ item.reason }}</span>
+    <section class="budget-panel budget-confirm">
+      <div class="budget-confirm-ring" style="background: var(--bud-accent);">
+        {{ icons.icon_check('budget-confirm-icon') }}
       </div>
-      <form method="post" action="/needs-review/{{ item.id }}/resolve" class="review-form">
-        <select name="category" required>
-          <option value="" disabled selected>Assign category...</option>
-          {% for c in categories %}
-            <option value="{{ c }}">{{ c }}</option>
-          {% endfor %}
-        </select>
-        <button type="submit">Resolve</button>
-      </form>
-    </div>
-  {% endfor %}
+      <p class="budget-confirm-sub">Nothing open. Nice.</p>
+    </section>
+  {% else %}
+    <p class="budget-settings-hint">{{ items|length }} item(s) need a category.</p>
+    {% for item in items %}
+      <section class="budget-panel review-card">
+        <div class="review-merchant">{{ item.merchant or "(no merchant)" }}</div>
+        {% if item.description %}<div class="review-desc">{{ item.description }}</div>{% endif %}
+        <div class="review-meta">
+          {% if item.amount is not none %}<span class="review-amount">${{ "%.2f"|format(item.amount) }}</span>{% endif %}
+          <span class="budget-settings-hint review-reason">{{ item.reason }}</span>
+        </div>
+        <form method="post" action="/needs-review/{{ item.id }}/resolve" class="review-form">
+          <select name="category" required class="budget-note-input">
+            <option value="" disabled selected>Assign category&hellip;</option>
+            {% for c in categories %}
+              <option value="{{ c }}">{{ c }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="budget-primary-btn review-resolve-btn" style="background: var(--bud-accent);">Resolve</button>
+        </form>
+      </section>
+    {% endfor %}
+  {% endif %}
+
 {% endblock %}

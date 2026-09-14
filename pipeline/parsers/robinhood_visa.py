@@ -22,7 +22,7 @@ import datetime
 import io
 import re
 
-import accounts
+from .. import accounts
 from .common import ParseResult, TxnRow, sniff_text, RECONCILE_TOLERANCE
 
 ACCOUNT_NAME = accounts.ROBINHOOD_VISA

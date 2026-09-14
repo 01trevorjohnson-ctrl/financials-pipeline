@@ -13,7 +13,7 @@ import datetime
 import os
 import re
 
-import accounts
+from .. import accounts
 from .common import MON, AMT_RE, money, ParseResult, TxnRow, pdf_pages, RECONCILE_TOLERANCE
 
 SEC_HEADS = {

@@ -1,22 +1,84 @@
 # Financials Pipeline
 
 Automates the Johnson/Suarez household's monthly finance ledger. Two
-independent services, one repo:
+independent Railway *services* sharing one repo AND, as of this version,
+one Python package tree at the repo root (see "Architecture" below):
 
-- **`pipeline/`** -- a run-to-completion script (Railway **Cron Job**, e.g.
-  daily). Watches a shared Google Drive folder for new bank/card statements,
-  parses them, reconciles the parsed transactions against each statement's
-  own printed totals, categorizes every row, and writes everything to
-  Supabase. Never guesses: anything it can't confidently parse, reconcile,
-  or categorize is left for a human (file stays in Drive; a `needs_review`
-  row is queued).
-- **`dashboard/`** -- a minimal FastAPI web app (Railway **Web Service**,
-  always-on). Password-gated. Three pages: Summary (Flow + Category
-  totals), Needs Review (resolve flagged transactions), Assets &
-  Liabilities (read-only).
+- **`pipeline/`** -- importable package whose `run_pipeline()` (in
+  `pipeline/main.py`) is the pipeline's entire logic, run either on a
+  schedule (Railway **Cron Job**) or on demand from the dashboard's "Run
+  Pipeline Now" button. Watches a shared Google Drive folder for new
+  bank/card statements, parses them, reconciles the parsed transactions
+  against each statement's own printed totals, categorizes every row, and
+  writes everything to Supabase. Never guesses: anything it can't
+  confidently parse, reconcile, or categorize is left for a human (file
+  stays in Drive; a `needs_review` row is queued).
+- **`dashboard/`** -- a FastAPI + Jinja2 web app (Railway **Web Service**,
+  always-on), password-gated, styled to match the FAMILY app's "budget"
+  visual language (see "UI" below). Four mobile-first pages behind a
+  bottom tab bar: **Home** (pipeline status + "Run Pipeline Now"),
+  **Review** (resolve flagged transactions, at `/needs-review`), **Trends**
+  (month-by-category spend chart), and **Ask** (plain-English Q&A backed
+  by the Claude API). The old Summary and Assets & Liabilities pages were
+  removed per the household's request; their underlying `dashboard/db.py`
+  query patterns and the Supabase tables themselves are untouched.
 
 Data lives in Supabase Postgres, project `family-finance`
 (`wfpaakmjveuhugskqmup`). This repo does not create or alter that schema.
+
+---
+
+## 0. Architecture: both services now build from the repo root
+
+Both Railway services used to have their Root Directory set to their own
+subfolder (`pipeline` / `dashboard`), each with its own
+`requirements.txt`/`.python-version`, and each subfolder's Python files
+used plain top-level imports (`import db`, `import accounts`, ...) that
+only worked because the process's cwd was that subfolder.
+
+That changed to let the dashboard's "Run Pipeline Now" button (see section
+2) import and call the pipeline's own `run_pipeline()` function directly,
+in-process -- which requires both `pipeline/` and `dashboard/` to be
+regular importable Python packages (each now has an `__init__.py`) living
+under one shared import root. Consequences, all already done in this repo:
+
+- **One `requirements.txt` and one `.python-version` at the repo root**
+  (the union of the old `pipeline/requirements.txt` and
+  `dashboard/requirements.txt`, plus `anthropic` for the Ask page) --
+  the two subfolder copies of each file are gone.
+- **Both services' Root Directory must be changed to the repo root** (`.`
+  or blank), not `pipeline` / `dashboard`, so Nixpacks sees the root
+  `requirements.txt` and both packages.
+- **Both services' Start Command must change** to run the app as a module
+  from the repo root, so Python's package/import machinery resolves
+  `pipeline.*` / `dashboard.*` correctly:
+  - pipeline (Cron Job): `python -m pipeline.main`
+  - dashboard (Web Service): `python -m uvicorn dashboard.main:app --host 0.0.0.0 --port $PORT`
+    (the `python -m` form, not a bare `uvicorn ...`, guarantees the repo
+    root is on `sys.path` regardless of how uvicorn's own CLI resolves
+    `--app-dir`)
+- **`GOOGLE_SERVICE_ACCOUNT_KEY` must now also be set on the dashboard
+  service**, not just the pipeline's -- see the env var table below.
+
+Internally, every former top-level import inside `pipeline/` (`import db`,
+`import accounts`, `from categorize import ...`, `from parsers import
+...`) is now a package-relative import (`from . import db`, `from .. import
+accounts`, `from .categorize import ...`, `from .parsers import ...`), and
+`dashboard/main.py`'s `import db` is now `from . import db`. This was
+necessary, not just tidiness: once the dashboard process imports the
+`pipeline` package into the same Python process (to call `run_pipeline()`),
+a plain top-level `import db` from *either* package would collide in
+`sys.modules` -- Python caches modules by name, so `pipeline/main.py`'s
+`import db` and `dashboard/main.py`'s `import db` would silently resolve
+to whichever one loaded first, handing the pipeline the dashboard's `db.py`
+(or vice versa) with no error, just wrong behavior. Explicit relative
+imports give each package its own `pipeline.db` / `dashboard.db` names, so
+there's no collision.
+
+**None of this changes pipeline *behavior*** -- `pipeline/main.py`'s
+`run_pipeline()` contains the exact same logic as the old `main()`, still
+writes the same rows, still preserves the exact original cron exit-code
+contract (see section 1).
 
 ---
 
@@ -79,35 +141,121 @@ Data lives in Supabase Postgres, project `family-finance`
    into **"Source Documents (Standardized Names)"**, e.g.
    `"2026-05 - AMEX ConnectMiles (...4473) statement.csv"`.
 
-Run it locally (with a populated `.env`, see below):
+`run_pipeline()` (in `pipeline/main.py`) contains all of the above and
+returns a `PipelineRunResult` (files found/processed/skipped/failed,
+transactions inserted, needs_review rows queued) -- it never calls
+`print()`/`sys.exit()`, only structured `logging`, so it's safe to call
+from a long-running process. This is what lets the dashboard's "Run
+Pipeline Now" button (see section 2) trigger an on-demand run of the exact
+same logic as the cron job, in-process. The `if __name__ == '__main__':`
+block at the bottom of `pipeline/main.py` is a thin wrapper: call
+`run_pipeline()`, print a human-readable summary in the same style as the
+original script's log output (since Railway's cron logs are how the
+household verifies runs), exit 0/1. **The exit-code contract is
+unchanged from the original script**: only a truly unexpected exception
+(not a parse/reconciliation failure, which is expected/handled behavior)
+makes a run exit non-zero.
+
+Run it locally (with a populated `.env`, see below), from the repo root:
 
 ```bash
-cd pipeline
 pip install -r requirements.txt
-python main.py
+python -m pipeline.main
 ```
 
 ## 2. How the dashboard works
 
-Three pages behind a password form (`DASHBOARD_PASSWORD`, checked against a
-signed session cookie -- no per-user accounts, per the brief: "keep this
-simple, not enterprise-grade"):
+Four mobile-first pages behind a password form (`DASHBOARD_PASSWORD`,
+checked against a signed session cookie -- no per-user accounts, per the
+brief: "keep this simple, not enterprise-grade") and a glassy bottom tab
+bar, styled to match the FAMILY app's own "budget" visual language exactly
+(same `--bud-*` CSS custom property names, same Outfit/Manrope fonts, same
+glass-panel/blob/starfield treatment -- see `dashboard/static/style.css`
+and `dashboard/colors.py`, built by reading
+`family-finance/src/app/globals.css`, `_shared/colors.ts`, and
+`budget/fonts.ts` directly):
 
-- `/summary` -- Flow and Category totals across all transactions.
-- `/needs-review` -- open `needs_review` rows, each with a dropdown to
-  assign a category (looked up against `category_keys` for the matching
-  flow) and mark resolved; writes back to `transactions.category`/`.flow`
-  and `needs_review.status='resolved'`.
-- `/assets` -- read-only `assets_liabilities`, split into Assets/
-  Liabilities with totals and a naive net worth.
+- **Home** (`/home`) -- a compact status summary (open `needs_review`
+  count, last pipeline activity) plus the **Run Pipeline Now** button
+  (`POST /run-pipeline`, redirect-with-flash-message pattern: the result
+  is stashed in the signed session cookie and shown once on the next
+  `/home` load). Calls `pipeline.main.run_pipeline()` synchronously --
+  production log history shows a run takes seconds, not minutes, so no
+  background-job infrastructure was added for this.
+- **Review** (`/needs-review` -- route path kept from the original spec;
+  only the nav label changed) -- open `needs_review` rows, each with a
+  dropdown to assign a category (looked up against `category_keys` for
+  the matching flow) and mark resolved; writes back to
+  `transactions.category`/`.flow` and `needs_review.status='resolved'`.
+  Unchanged functionality from before, restyled only.
+- **Trends** (`/trends`) -- a Chart.js line chart of monthly Spend by
+  category (`transactions` rows pulled via the same supabase-py table
+  builder used everywhere else in this app, then bucketed by month in
+  Python -- `date_trunc` grouping isn't expressible through the PostgREST
+  builder, so this is the one Python-side aggregation, not a second raw-SQL
+  path) with a checkbox list of every category actually present in the
+  data, defaulting to the top 6 by total spend. Category colors come from
+  `dashboard/colors.py` (see "Category colors" below).
+- **Ask** (`/ask`) -- plain-English Q&A backed by the Claude API (see
+  "The Ask page" below). Shows a "not configured yet" message instead of
+  crashing if `ANTHROPIC_API_KEY` isn't set.
 
-Run it locally:
+The old **Summary** and **Assets & Liabilities** pages were removed per
+the household's request (item 2 of the six things they asked for). Their
+routes/templates are gone; the `assets_liabilities` table and
+`dashboard/db.py`'s general query patterns are untouched in case a future
+page needs similar data again.
+
+Run it locally, from the repo root:
 
 ```bash
-cd dashboard
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+python -m uvicorn dashboard.main:app --reload --port 8000
 ```
+
+### Category colors
+
+`dashboard/colors.py` reuses the FAMILY app's exact category hex values
+(from `family-finance/src/app/budget/category-config.tsx`) for every
+category name that means the same thing in both apps (e.g. "Groceries" is
+`#3FA672` in both). For categories that exist only in this app's data
+(`Rent`, `Travel`, `Student loans`, `Childcare & education`, `Gifts &
+support to individuals`, `Utilities & internet`, `Taxes & professional`,
+`Cash`, `Subscriptions & software`, `Insurance & fees`, `Charitable
+giving`, `Uncategorized`), new colors were hand-picked to stay visually
+distinct from the reused ones and from `FINANCES_COLOR`
+(`#5568D8`, this app's own accent, reused verbatim from
+`family-finance/src/app/_shared/colors.ts`) and `SAVINGS_COLOR`
+(`#D4A72C`). Any category not in that table (e.g. a brand-new
+`category_keys` row added later) gets a deterministic color instead of a
+crash, generated from a hash of its name.
+
+### The Ask page
+
+Two Claude API calls, never raw SQL against the service-role-authenticated
+Supabase connection (`SUPABASE_SERVICE_KEY` bypasses RLS entirely, so
+LLM-generated SQL would be a real injection/safety risk):
+
+1. `dashboard/ask.py: build_filter_spec()` -- gives Claude the question,
+   the available fields, and the REAL distinct `category`/`flow` values
+   (queried from Supabase, not hardcoded), and asks for a small structured
+   JSON filter spec (`metric`, `date_from`, `date_to`, `categories`,
+   `flow`, `group_by`), guaranteed-valid JSON via `output_config.format`
+   (a JSON Schema). `validate_spec()` then whitelists every field
+   server-side (categories/flow against the real queried values, dates
+   parsed and range-checked) before it's used for anything.
+2. The validated spec runs through `dashboard/db.py: run_ask_query()` --
+   the same supabase-py `.table(...).select(...)` builder pattern as every
+   other query in this app -- then `compute_metric()` sums/counts/averages
+   the result in Python, optionally grouped by category or month.
+3. `dashboard/ask.py: phrase_answer()` -- a second Claude call, given the
+   original question plus the actual computed numbers, phrases a short
+   natural-language answer. The underlying numbers are always shown
+   alongside it on the page, not just the LLM's sentence.
+
+Model: `claude-haiku-4-5` for both calls -- a small/fast model is the
+right cost/latency tradeoff here since both calls are simple (a short JSON
+extraction, then a one-paragraph phrasing), not open-ended reasoning.
 
 ### Important: why the dashboard prefers `SUPABASE_SERVICE_KEY` over the anon key
 
@@ -153,10 +301,16 @@ git push -u origin main
 2. Railway will create one service from the repo root. Open its
    **Settings**:
    - **Service Name**: `financials-pipeline` (or similar).
-   - **Root Directory**: `pipeline`
-   - **Build**: leave on Nixpacks (auto-detected from `requirements.txt`
-     and `.python-version`); no custom build command needed.
-   - **Deploy -> Custom Start Command**: `python main.py`
+   - **Root Directory**: the repo root (`.` / leave blank) -- **not**
+     `pipeline`. See section 0: both services now build from the repo
+     root so the dashboard can import the pipeline package in-process.
+   - **Build**: leave on Nixpacks (auto-detected from the root
+     `requirements.txt` and `.python-version`); no custom build command
+     needed.
+   - **Deploy -> Custom Start Command**: `python -m pipeline.main` --
+     **not** `python main.py` or `python pipeline/main.py`. The `-m` form
+     is required: it's what makes `pipeline/main.py`'s package-relative
+     imports (`from . import db`, etc.) resolve correctly.
    - **Deploy -> Service Type**: change this service to **Cron Job** (not
      the default always-on Web Service) -- Railway's Cron Job type runs
      the start command on a schedule and exits, rather than expecting a
@@ -180,13 +334,24 @@ git push -u origin main
    own root directory).
 2. Settings:
    - **Service Name**: `financials-dashboard` (or similar).
-   - **Root Directory**: `dashboard`
-   - **Build**: Nixpacks auto-detected, no custom build command.
+   - **Root Directory**: the repo root (`.` / leave blank) -- **not**
+     `dashboard`. Same reason as above: this service now imports the
+     `pipeline` package directly for the "Run Pipeline Now" button, so it
+     needs both packages on its import path.
+   - **Build**: Nixpacks auto-detected (root `requirements.txt`), no
+     custom build command.
    - **Deploy -> Custom Start Command**:
-     `uvicorn main:app --host 0.0.0.0 --port $PORT`
+     `python -m uvicorn dashboard.main:app --host 0.0.0.0 --port $PORT`
+     -- the `python -m uvicorn` form (not a bare `uvicorn ...`) guarantees
+     the repo root is on `sys.path` so `dashboard.main`'s package-relative
+     imports and its `from pipeline.main import run_pipeline` both
+     resolve.
    - **Service Type**: leave as the default **Web Service** (always-on;
      this is not a cron job).
-3. Set environment variables -- see the table below.
+3. Set environment variables -- see the table below. **Note the new
+   `GOOGLE_SERVICE_ACCOUNT_KEY` and `ANTHROPIC_API_KEY` rows** -- both are
+   new requirements on this service specifically (see section 0 and "The
+   Ask page" above).
 4. Deploy. Railway gives it a generated domain under **Settings ->
    Networking -> Public Networking** (looks like
    `financials-dashboard-production.up.railway.app`) -- click **Generate
@@ -208,6 +373,8 @@ git push -u origin main
 | dashboard | `SUPABASE_ANON_KEY` *(optional, forward-looking)* | Same API settings page -> **Project API keys -> `anon` `public`**. Currently unused unless `SUPABASE_SERVICE_KEY` is absent (see above); set it anyway so it's ready once real Supabase Auth is added. |
 | dashboard | `DASHBOARD_PASSWORD` | Pick your own password for the household. Anyone with it can view and resolve review items. |
 | dashboard | `SESSION_SECRET` *(optional)* | Any random string. If omitted, one is derived from `DASHBOARD_PASSWORD`; set this to decouple the cookie-signing key from the login password. |
+| dashboard | `GOOGLE_SERVICE_ACCOUNT_KEY` **(new)** | Same value as the pipeline's own key above. Required now because the dashboard's "Run Pipeline Now" button imports and calls the pipeline package in-process, and the pipeline needs Drive access to do anything. |
+| dashboard | `ANTHROPIC_API_KEY` **(new)** | From [console.anthropic.com](https://console.anthropic.com). Powers the Ask page (see "The Ask page" above). If unset, the Ask page shows a "not configured yet" message rather than crashing -- deploy without it first and add it whenever the household has a key. |
 
 ### 3.4 Custom domain: `finances.holamajordomo.com` -> the dashboard
 
@@ -264,7 +431,9 @@ confirm.
 - `needs_review` -- queue for anything the pipeline couldn't confidently
   categorize (see threshold above) or couldn't parse/reconcile at all.
 - `assets_liabilities`, `income_paychecks` -- untouched by this pipeline;
-  manual/occasional updates only, shown read-only on `/assets`.
+  manual/occasional updates only. No longer surfaced in the dashboard UI
+  (the `/assets` page was removed per the household's request), but the
+  table itself is untouched in case a future page needs it again.
 
 ---
 
@@ -313,6 +482,35 @@ confirm.
   `SESSION_SECRET` isn't set, purely to avoid one more required env var for
   a two-person household app. Set `SESSION_SECRET` explicitly if you'd
   rather they be unrelated.
+- **"Last pipeline activity" on Home**: there's no dedicated pipeline-run
+  log table (this repo still does not create/alter the Supabase schema),
+  so `dashboard/db.py: get_last_pipeline_activity()` uses the most recent
+  `processed_statements.processed_at` as a proxy. Caveat, worth knowing:
+  `processed_at` is set once at insert and is not bumped by
+  `update_processed_statement()` on a retry, and a run that finds zero new
+  Drive files doesn't touch this table at all -- so it reflects "the last
+  time a *file* was processed," not strictly "the last cron invocation."
+  Good enough for a glance on Home; a real run-log table would be the
+  cleaner fix if the household wants exact cron-run history later.
+- **`/needs-review` route path kept as-is**: the brief said "keep
+  `/needs-review`" while also asking for a bottom-tab-bar restructure with
+  a "Review" tab -- read literally as keeping the URL (for any existing
+  bookmarks/muscle memory) while only the nav label/styling changes to
+  "Review". `/summary` and `/assets` were removed entirely (routes,
+  templates, nav links) per the brief.
+- **Chart.js version pin**: `dashboard/templates/trends.html` loads
+  `https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.1/chart.umd.min.js`
+  -- verified against cdnjs's own library API while building this (the
+  cdnjs slug is capitalized `Chart.js`, and the file is `chart.umd.min.js`,
+  not `chart.min.js`, for the UMD global the inline `<script>` expects).
+- **Ask page model choice**: `claude-haiku-4-5` for both Claude calls, per
+  this task's own brief ("a small/fast model is fine for both calls given
+  the queries are simple") -- see `dashboard/ask.py`.
+- **Category colors for FP-only categories**: hand-picked to stay visually
+  distinct from the 8 reused FAMILY colors and from `FINANCES_COLOR`/
+  `SAVINGS_COLOR`; see `dashboard/colors.py` and "Category colors" above.
+  A category not in that table (future `category_keys` addition) gets a
+  deterministic hash-based color instead of breaking.
 
 ## 6. What I could NOT do from here (needs you)
 
@@ -324,6 +522,15 @@ confirm.
   `git init`'d with an initial commit, ready for `git remote add` +
   `git push`.
 - **Any Railway configuration itself** -- no `railway` CLI was installed or
-  used; section 3 above is the exact manual click-path.
+  used; section 3 above is the exact manual click-path, including the
+  **Root Directory and Start Command changes for both existing services**
+  (section 0 and 3.1/3.2) needed for this update's architecture change --
+  those must be applied by hand in Railway's dashboard.
 - **Namecheap DNS changes** -- section 3.4 above is the exact manual
   click-path.
+- **Live-test "Run Pipeline Now" and the Ask page against production
+  credentials** -- verified locally with mocked Supabase/pipeline/Claude
+  responses (import chain, route behavior, and visual rendering in a
+  browser preview, including dark mode) since no live Railway/Supabase/
+  Anthropic credentials are available in this environment. Confirm both
+  once deployed with real env vars.

@@ -16,13 +16,22 @@ service key is configured -- which will only successfully read/write once
 the household later sets up real Supabase Auth (a dedicated signed-in user)
 or relaxes the RLS policies; until then it will return empty results. The
 whole app is already gated by DASHBOARD_PASSWORD before any Supabase call
-is made (see auth.py), so using the service key here does not weaken the
+is made (see main.py), so using the service key here does not weaken the
 "only two household members can view this" property -- it's the same trust
 model as any server-side app holding a backend DB credential behind a login.
+
+All queries here go through supabase-py's ``.table(...).select(...)``
+builder (PostgREST), same pattern as pipeline/db.py -- no raw SQL anywhere
+in this app, including the Trends and Ask pages (see main.py for how their
+month-bucketing/aggregation is done in Python once the filtered rows are
+fetched).
 """
 from __future__ import annotations
 
+import calendar
+import datetime
 import os
+from collections import defaultdict
 from functools import lru_cache
 
 from supabase import create_client, Client
@@ -37,3 +46,163 @@ def get_client() -> Client:
             'SUPABASE_URL and (SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY) must be set in the '
             'environment. See README.md "Environment variables".')
     return create_client(url, key)
+
+
+# ---------------------------------------------------------------------------
+# Home: pipeline status summary
+# ---------------------------------------------------------------------------
+def get_open_needs_review_count(client: Client) -> int:
+    resp = client.table('needs_review').select('id', count='exact').eq('status', 'open').execute()
+    return resp.count or 0
+
+
+def get_last_pipeline_activity(client: Client) -> dict | None:
+    """Most recent processed_statements row (by processed_at), used as a
+    proxy for "when did the pipeline last do something" on the Home page.
+
+    Caveat, worth knowing: processed_at is set once at insert time and is
+    NOT bumped by pipeline/db.py's update_processed_statement() on a retry
+    of a previously-errored file, and a pipeline run that finds zero new
+    Drive files touches this table at all -- so this reflects the last time
+    a *file* was processed, not strictly the last cron invocation. There is
+    no separate "pipeline run log" table (this repo intentionally does not
+    alter the Supabase schema -- see README.md), so this is the closest
+    honest signal available without adding one.
+    """
+    resp = (client.table('processed_statements')
+            .select('original_filename, standardized_filename, status, reconciliation_ok, '
+                    'reconciliation_detail, row_count, processed_at')
+            .order('processed_at', desc=True).limit(1).execute())
+    rows = resp.data or []
+    return rows[0] if rows else None
+
+
+# ---------------------------------------------------------------------------
+# Needs Review
+# ---------------------------------------------------------------------------
+def get_open_needs_review(client: Client) -> list:
+    resp = (client.table('needs_review').select('*')
+            .eq('status', 'open').order('created_at', desc=True).execute())
+    return resp.data or []
+
+
+def get_active_categories(client: Client) -> list:
+    resp = client.table('category_keys').select('category').eq('active', True).execute()
+    return sorted({r['category'] for r in (resp.data or [])})
+
+
+def resolve_needs_review(client: Client, review_id: str, category: str) -> None:
+    review_resp = client.table('needs_review').select('*').eq('id', review_id).limit(1).execute()
+    review_rows = review_resp.data or []
+    if not review_rows:
+        return
+    review = review_rows[0]
+
+    # Look up the flow that goes with this category from category_keys, so
+    # we don't leave a stale/mismatched flow on the transaction.
+    flow = None
+    ck_resp = client.table('category_keys').select('flow').eq('category', category).limit(1).execute()
+    if ck_resp.data:
+        flow = ck_resp.data[0]['flow']
+
+    if review.get('transaction_id'):
+        update = {'category': category}
+        if flow:
+            update['flow'] = flow
+        client.table('transactions').update(update).eq('id', review['transaction_id']).execute()
+
+    client.table('needs_review').update({
+        'status': 'resolved',
+        'resolved_category': category,
+        'resolved_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }).eq('id', review_id).execute()
+
+
+# ---------------------------------------------------------------------------
+# Trends: month x category spend, via the PostgREST table builder + Python
+# bucketing (date_trunc('month', ...) grouping isn't expressible through
+# supabase-py's builder, so raw filtered rows are pulled and bucketed here --
+# same approach used everywhere else in this file, no second raw-SQL path).
+# ---------------------------------------------------------------------------
+def get_distinct_spend_categories(client: Client) -> list:
+    """Distinct transactions.category values actually present for
+    flow='Spend' -- real data, not the category_keys catalog (which may
+    include categories with zero transactions, or exclude ad hoc ones)."""
+    resp = client.table('transactions').select('category').eq('flow', 'Spend').execute()
+    return sorted({r['category'] for r in (resp.data or []) if r.get('category')})
+
+
+def get_monthly_spend_by_category(client: Client) -> dict:
+    """Returns {category: {'YYYY-MM': total_amount, ...}, ...} for every
+    flow='Spend' transaction, bucketed by calendar month in Python."""
+    resp = client.table('transactions').select('date, category, amount').eq('flow', 'Spend').execute()
+    rows = resp.data or []
+
+    by_cat: dict = defaultdict(lambda: defaultdict(float))
+    for r in rows:
+        cat = r.get('category') or 'Uncategorized'
+        date_str = r.get('date')
+        amt = r.get('amount') or 0
+        if not date_str:
+            continue
+        month_key = date_str[:7]  # 'YYYY-MM-DD' -> 'YYYY-MM'
+        by_cat[cat][month_key] += amt
+
+    return {cat: dict(months) for cat, months in by_cat.items()}
+
+
+def top_categories_by_total_spend(monthly_by_category: dict, n: int = 6) -> list:
+    totals = [(cat, sum(months.values())) for cat, months in monthly_by_category.items()]
+    totals.sort(key=lambda kv: -kv[1])
+    return [cat for cat, _total in totals[:n]]
+
+
+def month_range(monthly_by_category: dict) -> list:
+    """Sorted list of every 'YYYY-MM' key present across all categories, so
+    every series can be plotted against the same x-axis (missing months ->
+    0)."""
+    months = set()
+    for months_dict in monthly_by_category.values():
+        months.update(months_dict.keys())
+    return sorted(months)
+
+
+def month_label(month_key: str) -> str:
+    year, month = month_key.split('-')
+    return f'{calendar.month_abbr[int(month)]} {year}'
+
+
+# ---------------------------------------------------------------------------
+# Ask: LLM-assisted Q&A, backed by a validated structured filter spec (see
+# main.py ask_submit()) run through this same table builder -- never raw SQL,
+# never string-interpolating LLM output into a query.
+# ---------------------------------------------------------------------------
+def get_distinct_categories_all_flows(client: Client) -> list:
+    resp = client.table('transactions').select('category').execute()
+    return sorted({r['category'] for r in (resp.data or []) if r.get('category')})
+
+
+def get_distinct_flows(client: Client) -> list:
+    resp = client.table('transactions').select('flow').execute()
+    return sorted({r['flow'] for r in (resp.data or []) if r.get('flow')})
+
+
+def run_ask_query(client: Client, *, date_from: str | None, date_to: str | None,
+                   categories: list | None, flow: str | None) -> list:
+    """Runs a filtered, parameterized query via the supabase-py table
+    builder using an ALREADY-VALIDATED spec (validation happens in
+    main.py's ask_submit() against the real category/flow values -- this
+    function does not trust its caller further, but it also does no
+    string interpolation of any kind, so there is no injection surface
+    regardless)."""
+    q = client.table('transactions').select('date, amount, category, flow, merchant, cardholder')
+    if date_from:
+        q = q.gte('date', date_from)
+    if date_to:
+        q = q.lte('date', date_to)
+    if categories:
+        q = q.in_('category', categories)
+    if flow:
+        q = q.eq('flow', flow)
+    resp = q.execute()
+    return resp.data or []

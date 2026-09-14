@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% import "_icons.html" as icons %}
+{% block title %}Home - Household Finances{% endblock %}
+{% block header_title %}Finances{% endblock %}
+{% block content %}
+
+  {% if run_flash %}
+    <section class="budget-panel run-flash {{ 'is-ok' if run_flash.ok else 'is-bad' }}">
+      <div class="budget-panel-head">
+        <div class="budget-panel-title">
+          {% if run_flash.crashed %}
+            {{ icons.icon_alert('budget-panel-icon icon-bad') }}
+            <span>Pipeline run failed to start</span>
+          {% elif run_flash.ok %}
+            {{ icons.icon_check('budget-panel-icon icon-ok') }}
+            <span>Pipeline run complete</span>
+          {% else %}
+            {{ icons.icon_alert('budget-panel-icon icon-bad') }}
+            <span>Pipeline run finished with errors</span>
+          {% endif %}
+        </div>
+      </div>
+
+      {% if run_flash.crashed %}
+        <p class="run-flash-detail">{{ run_flash.error }}</p>
+      {% else %}
+        <div class="stat-row">
+          <div class="stat-tile">
+            <div class="stat-label">Found</div>
+            <div class="stat-value">{{ run_flash.files_found }}</div>
+          </div>
+          <div class="stat-tile">
+            <div class="stat-label">Processed</div>
+            <div class="stat-value">{{ run_flash.files_processed }}</div>
+          </div>
+          <div class="stat-tile">
+            <div class="stat-label">Skipped</div>
+            <div class="stat-value">{{ run_flash.files_skipped }}</div>
+          </div>
+          <div class="stat-tile">
+            <div class="stat-label">Failed</div>
+            <div class="stat-value">{{ run_flash.failed|length }}</div>
+          </div>
+        </div>
+        <p class="run-flash-detail">
+          {{ run_flash.transactions_inserted }} transaction(s) inserted &middot;
+          {{ run_flash.needs_review_queued }} needs-review row(s) queued
+        </p>
+        {% if run_flash.failed %}
+          <ul class="run-flash-failures">
+            {% for f in run_flash.failed %}
+              <li><strong>{{ f.filename }}</strong> &mdash; {{ f.detail }}</li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      {% endif %}
+    </section>
+  {% endif %}
+
+  <section class="budget-panel">
+    <div class="budget-panel-head">
+      <div class="budget-panel-title">Status</div>
+    </div>
+    <div class="stat-row">
+      <div class="stat-tile">
+        <div class="stat-label">Open review items</div>
+        <div class="stat-value {{ 'is-attention' if open_review_count else '' }}">{{ open_review_count }}</div>
+      </div>
+      <div class="stat-tile">
+        <div class="stat-label">Last pipeline activity</div>
+        {% if last_activity %}
+          <div class="stat-value stat-value-sm">{{ last_activity.processed_at[:16].replace('T', ' ') }}</div>
+        {% else %}
+          <div class="stat-value stat-value-sm">Never</div>
+        {% endif %}
+      </div>
+    </div>
+    {% if last_activity %}
+      <p class="budget-settings-hint">
+        Last file touched: <strong>{{ last_activity.original_filename }}</strong>
+        &mdash;
+        {% if last_activity.status == 'processed' %}processed OK{% else %}{{ last_activity.status }}{% endif %}
+        {% if last_activity.row_count %}({{ last_activity.row_count }} rows){% endif %}
+      </p>
+    {% endif %}
+  </section>
+
+  <section class="budget-panel">
+    <div class="budget-panel-head">
+      <div class="budget-panel-title">
+        {{ icons.icon_run('budget-panel-icon') }}
+        <span>Pipeline</span>
+      </div>
+    </div>
+    <p class="budget-note-summary">
+      Checks the Drive folder for new statements, parses and reconciles them, and files
+      anything it can't confidently handle for review.
+    </p>
+    <form method="post" action="/run-pipeline">
+      <button type="submit" class="budget-primary-btn" style="background: var(--bud-accent);">
+        Run Pipeline Now
+      </button>
+    </form>
+  </section>
+
+{% endblock %}
