@@ -32,6 +32,14 @@ own wording of each):
    single row (see parsers/panama_mastercard_csv.py and
    parsers/amex_connectmiles_csv.py); it matches the Insurance & fees
    category via its own "TOTAL ITBMS" keyword through the normal loop.
+
+6. Transfers to individuals: an outgoing person-to-person transfer (Yappy,
+   Banca Móvil, BAC TEF/ACH, Zelle, Venmo) is only auto-categorized when a
+   *specific* category keyword names the payee (e.g. the nanny, the
+   tennis coach). Otherwise -- no keyword, or only a generic transfer
+   marker like "TEF A :" -- it stays Uncategorized, skips the LLM
+   fallback, and is always queued for review regardless of
+   NEEDS_REVIEW_THRESHOLD. See Categorizer.is_unconfirmed_transfer_to_individual.
 """
 from __future__ import annotations
 
@@ -50,6 +58,21 @@ logger = logging.getLogger(__name__)
 
 _ZELLE_TREVOR_RE = re.compile(r'ACH\s+\S*\s*TREVOR JOHNSON', re.I)
 
+# Outgoing person-to-person transfer shapes, across sources. Also used to
+# spot *generic* keywords (e.g. "TEF A :", "VENMO PAYMENT") that say money
+# moved to someone but not what it was for.
+_P2P_RE = re.compile(r'''
+      ^YAPPY\s+BG\s+A\s                         # BG Yappy to a person ("PAGO YAPPY" = a business)
+    | \bTRANSFERENCIA\s+A\s                     # BG Banca Móvil / en Línea transfer
+    | \sto\s+Cuenta\s+(de\s+ahorros|corriente)  # BG "Transacciones realizadas" (historical)
+    | \bTEF\s+A\s*:                             # BAC transfer
+    | \bACH\s+XPR:                              # BAC ACH Express
+    | \]\s*ACH\s+(?!CRE\b)\S+\s                 # BAC "[4A] ACH BCOGENERAL <name>"
+    | \bZELLE\b.*\bSENT\s*TO | MONEY\s*SENT\s*TO
+    | \bVENMO\b
+''', re.I | re.X)
+_BUSINESS_RE = re.compile(r'\b(S\.?\s?A|S\.?\s?DE\s+R\.?\s?L|INC|LLC|PLLC|CORP|LTDA?)\b\.?', re.I)
+
 
 def _match_text(merchant: str, description: str) -> str:
     return f'{merchant or ""} | {description or ""}'.upper()
@@ -62,6 +85,17 @@ def is_self_transfer_to_trevor(description: str) -> bool:
     if _ZELLE_TREVOR_RE.search(description or ''):
         return True
     return False
+
+
+def is_transfer_to_individual(description: str, amount) -> bool:
+    """Outgoing P2P transfer to someone other than Trevor himself, and not
+    to a business (S.A., Inc, LLC...) or a fee line for such a transfer."""
+    d = description or ''
+    if amount is None or amount <= 0:
+        return False
+    if 'COMISION' in d.upper() or is_self_transfer_to_trevor(d):
+        return False
+    return bool(_P2P_RE.search(d)) and not _BUSINESS_RE.search(d)
 
 
 def is_wise_transfer(merchant: str, description: str) -> bool:
@@ -221,6 +255,17 @@ class Categorizer:
                 return row['category'], row['flow']
 
         return UNCATEGORIZED, fallback_flow(txn_type, amount)
+
+    def is_unconfirmed_transfer_to_individual(self, merchant: str, description: str, amount) -> bool:
+        """True for a transfer to an individual that no *specific* category
+        keyword identifies -- see special case 6 in the module docstring.
+        A keyword that is itself just a transfer marker ("TEF A :") doesn't
+        count as identifying the payee."""
+        if not is_transfer_to_individual(description, amount):
+            return False
+        text = _match_text(merchant, description)
+        return not any(kw in text and not _P2P_RE.search(f' {kw} ')
+                       for row in self.category_keys for kw in (row.get('keywords') or []))
 
     def categorize_batch(self, txn_rows):
         """Categorize a list of parsers.common.TxnRow-like objects (must

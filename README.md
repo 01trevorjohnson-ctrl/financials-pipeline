@@ -140,7 +140,19 @@ contract (see section 1).
      both match the `Delivery` category keyword directly.
    - Income vs. Refund precedence for "ACH CRE ..." lines: handled
      automatically by `category_keys.priority` ordering.
-7. Anything matching **no** keyword goes through one more step before
+   - **Transfers to individuals** (outgoing Yappy to a person, Banca Móvil
+     transfers, BAC `TEF A :` / `ACH XPR:` / `ACH <bank> <name>`, Zelle
+     "sent to", Venmo) are only auto-categorized when a *specific*
+     `category_keys` keyword names the payee (the nanny, the tennis
+     coach...). Otherwise -- no keyword, or only a generic transfer marker
+     like `TEF A :` / `VENMO PAYMENT` -- the row stays `Uncategorized`,
+     skips the LLM step below, and is **always** queued into
+     `needs_review` ("transfer to an individual"), regardless of the $50
+     threshold. Excluded: payees with a company suffix (S.A., Inc, LLC...),
+     fee lines, self-transfers to Trevor, and money coming in. To stop a
+     regular payee being flagged, add their name as a keyword on the right
+     category.
+7. Anything else matching **no** keyword goes through one more step before
    giving up: a single batched Claude API call per statement (see "LLM
    categorization fallback" below), classifying every keyword-unmatched row
    in that statement at once, constrained to the household's real category
