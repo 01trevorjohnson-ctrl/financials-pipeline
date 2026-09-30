@@ -701,6 +701,13 @@ confirm.
   sniff matches any "BAC CREDOMATIC" text). The AMEX PDF books its
   statement-level "Total ITBMS" as one row dated to the cutoff, as the
   AMEX CSV parser does.
+- **BAC "Consulta de Transferencias" CSV** (`panama_debit_bac_transfers.py`):
+  outgoing transfers from the debit account (...0794) with the recipient's
+  name (the statement shows BAC-to-BAC transfers only as "TEF A :
+  <acct>"). Only "Enviada" rows are booked. No balance or total, so it's a
+  structural check only, like the Robinhood spending CSV. Its rows overlap
+  the monthly statement on the same dates, so whichever is loaded second
+  adds only what's new.
 - **Needs-review threshold semantics**: "sum >= $50 OR any single row >=
   $50" is logically just "sum >= $50" (sum of absolute values is always >=
   any individual absolute value), and when it fires, *all* of that
