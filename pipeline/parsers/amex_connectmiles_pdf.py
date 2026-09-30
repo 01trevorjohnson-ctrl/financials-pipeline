@@ -31,11 +31,17 @@ def matches(filename: str, content: bytes) -> bool:
         text = pdf_text(content)
     except Exception:
         return False
-    return 'CONNECTMILES' in text.upper() or 'BAC CREDOMATIC' in text.upper()
+    # Every BAC Credomatic card statement shares this layout (and the
+    # "BAC CREDOMATIC" / ConnectMiles wording), so require the AMEX account
+    # number itself -- a Panama Mastercard PDF once matched the old,
+    # looser sniff and was booked here.
+    return bool(re.search(r'\b3702-[\d*]{4}-[\d*]{4}-4474\b', text))
 
 
 def parse(content: bytes, filename: str) -> ParseResult:
     text = pdf_text(content)
+    if not re.search(r'\b3702-[\d*]{4}-[\d*]{4}-4474\b', text):
+        raise ValueError('Not an AMEX ConnectMiles (3702-...-4474) PDF statement')
 
     stmt = re.search(r'N.? estado de cuenta\s+(\d{6})', text)
     prev = re.search(r'Saldo Anterior\s+\$([\d,]+\.\d{2})', text)
