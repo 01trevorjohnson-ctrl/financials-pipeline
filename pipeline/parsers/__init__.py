@@ -20,6 +20,7 @@ from . import (
     robinhood_visa,
     panama_mastercard_csv,
     panama_debit_bac,
+    panama_debit_bac_pdf,
     banco_general_movimientos,
     amex_connectmiles_pdf,
     amex_connectmiles_csv,
@@ -33,6 +34,7 @@ REGISTRY = [
     (capital_one_card, True),          # Quicksilver
     (capital_one_360, True),           # 360 Checking + Savings
     (huntington, True),
+    (panama_debit_bac_pdf, True),      # before amex_connectmiles_pdf: both are BAC PDFs
     (amex_connectmiles_csv, False),
     (amex_connectmiles_pdf, True),
     (panama_mastercard_csv, False),
