@@ -21,6 +21,7 @@ from . import (
     panama_mastercard_csv,
     panama_debit_bac,
     panama_debit_bac_pdf,
+    panama_debit_bac_transfers,
     banco_general_movimientos,
     amex_connectmiles_pdf,
     amex_connectmiles_csv,
@@ -38,6 +39,7 @@ REGISTRY = [
     (amex_connectmiles_csv, False),
     (amex_connectmiles_pdf, True),
     (panama_mastercard_csv, False),
+    (panama_debit_bac_transfers, False),  # BAC "Consulta de Transferencias" (0794)
     (panama_debit_bac, False),
     (banco_general_movimientos, True), # savings "Últimos movimientos"
     (robinhood_visa, False),           # csv or xlsx
