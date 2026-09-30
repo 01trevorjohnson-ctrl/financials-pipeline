@@ -74,8 +74,24 @@ def list_root_files(service) -> list:
     return files
 
 
-def download_file(service, file_id: str) -> bytes:
-    request = service.files().get_media(fileId=file_id)
+# Google-native files (Sheets, Docs) have no bytes to download: get_media
+# fails with "Only files with binary content can be downloaded". Export them
+# to a format the parsers (or the AI fallback) can read instead.
+GOOGLE_EXPORT_MIME = {
+    'application/vnd.google-apps.spreadsheet':
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'application/vnd.google-apps.document': 'application/pdf',
+}
+
+
+def download_file(service, file_id: str, mime_type: str | None = None) -> bytes:
+    if mime_type in GOOGLE_EXPORT_MIME:
+        request = service.files().export_media(fileId=file_id, mimeType=GOOGLE_EXPORT_MIME[mime_type])
+    elif mime_type and mime_type.startswith('application/vnd.google-apps.'):
+        raise ValueError(f'Google Drive file type {mime_type} is not a statement format '
+                         '(only Sheets and Docs can be exported)')
+    else:
+        request = service.files().get_media(fileId=file_id)
     buf = io.BytesIO()
     downloader = MediaIoBaseDownload(buf, request)
     done = False

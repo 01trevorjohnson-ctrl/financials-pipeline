@@ -99,6 +99,19 @@ def get_transaction_date_amounts(client: Client, card: str, start, end) -> list:
         offset += PAGE
 
 
+def has_open_statement_review(client: Client, statement_id: str) -> bool:
+    """Whether an open, file-level (no transaction) review item already
+    exists for this statement."""
+    resp = (client.table('needs_review')
+            .select('id')
+            .eq('statement_id', statement_id)
+            .is_('transaction_id', 'null')
+            .eq('status', 'open')
+            .limit(1)
+            .execute())
+    return bool(resp.data)
+
+
 def insert_needs_review(client: Client, rows: list) -> list:
     if not rows:
         return []

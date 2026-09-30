@@ -45,7 +45,7 @@ from . import db
 from . import drive_client
 from . import naming
 from .categorize import Categorizer, NEEDS_REVIEW_THRESHOLD, UNCATEGORIZED, llm_categorize_uncategorized
-from .parsers import parse_file
+from .parsers import llm_extract, parse_file
 from .parsers.common import UnrecognizedStatementError
 
 logger = logging.getLogger(__name__)
@@ -183,11 +183,16 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
         return FileRunResult(original_filename, file_id, 'skipped', detail='already processed')
 
     logger.info('Downloading: %s (%s)', original_filename, file_id)
-    content = drive_client.download_file(drive_service, file_id)
+    content = drive_client.download_file(drive_service, file_id, file_meta.get('mimeType'))
 
     # ---- parse -----------------------------------------------------------
+    # The AI fallback costs an API call per try; a file it already failed on
+    # (couldn't extract, or extracted rows that didn't reconcile) stays in
+    # the Drive root, so don't re-send it on every scheduled run.
+    prior = (existing or {}).get('reconciliation_detail') or ''
+    allow_llm = not (llm_extract.AI_FAILED_MARKER in prior or prior.startswith('AI-extracted'))
     try:
-        result = parse_file(original_filename, content)
+        result = parse_file(original_filename, content, allow_llm=allow_llm)
     except UnrecognizedStatementError as e:
         logger.warning('UNRECOGNIZED FORMAT: %s: %s', original_filename, e)
         detail = f'unrecognized statement format: {e}'
@@ -401,7 +406,9 @@ def _record_unprocessable(supabase, existing, file_id, original_filename, *, sta
             reconciliation_detail=detail, row_count=row_count)
         statement_id = stmt_row['id']
 
-    if status == 'needs_review':
+    # One open review item per file: an unrecognized file stays in the Drive
+    # root and is seen again every run, which used to queue a duplicate.
+    if status == 'needs_review' and not db.has_open_statement_review(supabase, statement_id):
         db.insert_needs_review(supabase, [{
             'transaction_id': None,
             'statement_id': statement_id,
@@ -413,6 +420,22 @@ def _record_unprocessable(supabase, existing, file_id, original_filename, *, sta
         }])
         return 1
     return 0
+
+
+def _record_unexpected_error(supabase, file_meta: dict, error: Exception) -> None:
+    """Best effort: leave a processed_statements row saying why a file
+    crashed, so it shows up next to the other failures instead of only in
+    the service logs. Never raises. Skips files already recorded as
+    processed, so a crash after a successful insert can't hide that."""
+    try:
+        existing = db.get_processed_statement_by_drive_id(supabase, file_meta['id'])
+        if existing and existing.get('status') == 'processed':
+            return
+        _record_unprocessable(supabase, existing, file_meta['id'], file_meta.get('name', '(unknown)'),
+                              status='error', detail=f'unexpected error: {error}'[:1000])
+    except Exception:
+        logger.error('Could not record the unexpected error for %s', file_meta.get('name'))
+        logger.error(traceback.format_exc())
 
 
 def run_pipeline() -> PipelineRunResult:
@@ -445,6 +468,7 @@ def run_pipeline() -> PipelineRunResult:
             result.unexpected_errors += 1
             logger.error('UNEXPECTED ERROR processing %s: %s', file_meta.get('name'), e)
             logger.error(traceback.format_exc())
+            _record_unexpected_error(supabase, file_meta, e)
             result.files.append(FileRunResult(
                 filename=file_meta.get('name', '(unknown)'), drive_file_id=file_meta.get('id', ''),
                 outcome='failed', detail=f'unexpected error: {e}'))
