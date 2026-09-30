@@ -23,8 +23,8 @@ balance. Any break fails the file (nothing inserted).
 
 OVERLAP: this is a rolling "last N movements" export, not a closed
 statement period, so consecutive downloads overlap each other (and the
-historical transfers backfill). The result sets ``dedupe_against_ledger``
-so ``main.py`` skips rows already in the ledger for this account.
+historical transfers backfill). ``main.py`` skips rows already in the
+ledger for this account (as it does for every format).
 """
 from __future__ import annotations
 
@@ -144,5 +144,5 @@ def parse(content: bytes, filename: str) -> ParseResult:
         account_name=ACCOUNT_NAME, rows=txns, statement_period=end,
         period_label=f'{start}..{end}',
         reconciliation_ok=ok, reconciliation_detail=detail,
-        accounts_covered=[ACCOUNT_NAME], dedupe_against_ledger=True,
+        accounts_covered=[ACCOUNT_NAME],
     )

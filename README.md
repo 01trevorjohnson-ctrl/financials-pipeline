@@ -680,13 +680,27 @@ confirm.
   replaced the older outgoing-transfers-only "Transacciones realizadas"
   PDF; rows still land on the `Banco General transfers (Panama)` account so
   history stays continuous. It reconciles against its running "Saldo
-  total" column and the printed header balance. Because consecutive
-  downloads overlap, its parser sets `ParseResult.dedupe_against_ledger`
-  and `main.py` skips rows whose (date, amount) is already in
-  `transactions` for that account (matched as a multiset, ignoring
-  description wording, since the historical backfill used different
-  wording). Download a new export at least every "last N movements" window
-  so no gap opens between files.
+  total" column and the printed header balance. Download a new export at
+  least every "last N movements" window so no gap opens between files.
+- **Overlapping uploads are processed, then de-duplicated -- never
+  rejected.** Every file is reconciled as printed, then `main.py` skips
+  rows whose (date, amount) is already in `transactions` for that account
+  and inserts the rest. Matched as a multiset (two identical same-day rows
+  in the file with one already in the ledger keeps one) and ignoring
+  description wording, since the same movement reads differently across
+  formats (CSV vs PDF, historical backfills). So a re-downloaded statement,
+  a PDF of a month already loaded from CSV, or overlapping rolling exports
+  all just add whatever is new; `reconciliation_detail` says how many rows
+  were skipped.
+- **BAC PDFs**: the Panama debit account (...0794) is read from both its
+  CSV export (`panama_debit_bac.py`) and its PDF statement
+  (`panama_debit_bac_pdf.py`, "RESUMEN DE CUENTA BANCARIA", reconciled on
+  the running Saldo from "Saldo Anterior" to "Saldo al Corte"). Both BAC
+  PDFs are often named just `EstadodeCuenta.pdf`, so they're told apart by
+  content, and the debit parser is checked before AMEX ConnectMiles (whose
+  sniff matches any "BAC CREDOMATIC" text). The AMEX PDF books its
+  statement-level "Total ITBMS" as one row dated to the cutoff, as the
+  AMEX CSV parser does.
 - **Needs-review threshold semantics**: "sum >= $50 OR any single row >=
   $50" is logically just "sum >= $50" (sum of absolute values is always >=
   any individual absolute value), and when it fires, *all* of that

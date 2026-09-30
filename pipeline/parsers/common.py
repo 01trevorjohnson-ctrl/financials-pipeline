@@ -103,10 +103,6 @@ class ParseResult:
     accounts_covered: list = field(default_factory=list)  # distinct account
                                                             # names actually
                                                             # present in rows
-    dedupe_against_ledger: bool = False  # rolling exports (not closed
-                                          # statement periods) overlap
-                                          # earlier files: main.py skips
-                                          # rows already in the ledger
 
 
 def pdf_text(content: bytes) -> str:

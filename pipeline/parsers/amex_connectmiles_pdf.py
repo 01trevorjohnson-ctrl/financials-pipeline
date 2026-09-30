@@ -3,6 +3,11 @@
 with Spanish 3-letter month codes.
 
 Ported from the household's reference script ``extract_amex.py``.
+
+TOTAL ITBMS (Panama VAT) is printed once on the last page with no
+per-transaction line, but it is part of the SALDO. As in
+``amex_connectmiles_csv.py`` (and per ``category_keys.notes``), it is booked
+as a single row dated to the statement cutoff ("Fecha de Corte").
 """
 from __future__ import annotations
 
@@ -72,7 +77,7 @@ def parse(content: bytes, filename: str) -> ParseResult:
             typ = 'Payment'
         elif amt < 0:
             typ = 'Credit'
-        elif up.startswith(('PLAN SALDOS DEU', 'PROTECCION ROBO')):
+        elif up.startswith(('PLAN SALDOS DEU', 'PROTECCION ROBO', 'INTERES FINANCIADO', 'COBRO ADMTVO')):
             typ = 'Fee'
         else:
             typ = 'Purchase'
@@ -81,6 +86,17 @@ def parse(content: bytes, filename: str) -> ParseResult:
 
     if not rows:
         raise ValueError('No transaction rows found on AMEX ConnectMiles PDF statement')
+
+    cutoff = re.search(r'Fecha de Corte\s+(\d{2})/(\d{2})/(\d{4})', text)
+    stmt_date = (datetime.date(int(cutoff.group(3)), int(cutoff.group(2)), int(cutoff.group(1)))
+                 if cutoff else max(r[0] for r in rows))
+    itbms_m = re.search(r'Total ITBMS\s+\$([\d,]*\.\d{2})', text, re.I)
+    itbms = float(('0' + itbms_m.group(1) if itbms_m.group(1).startswith('.') else itbms_m.group(1))
+                  .replace(',', '')) if itbms_m else 0.0
+    if itbms:
+        ssum += itbms
+        rows.append((stmt_date, round(itbms, 2), 'Fee', 'TOTAL ITBMS (Panama VAT, statement total)',
+                     'ITBMS (Panama VAT)', None, 'Sandra Viviana Suarez Jimenez'))
 
     txns = [
         TxnRow(date=d, amount=amt, type=typ, description=desc, merchant=merch,

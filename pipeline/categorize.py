@@ -67,10 +67,25 @@ _P2P_RE = re.compile(r'''
     | \sto\s+Cuenta\s+(de\s+ahorros|corriente)  # BG "Transacciones realizadas" (historical)
     | \bTEF\s+A\s*:                             # BAC transfer
     | \bACH\s+XPR:                              # BAC ACH Express
-    | \]\s*ACH\s+(?!CRE\b)\S+\s                 # BAC "[4A] ACH BCOGENERAL <name>"
+    | (^|\])\s*ACH\s+(?!(CRE|WITHDRAWAL|DEPOSIT)\b)\S+\s  # BAC "[4A] ACH BCOGENERAL <name>" (CSV) / no code (PDF)
+    | ^BAC_INTERNATION\s                        # BAC transfer to another BAC client
     | \bZELLE\b.*\bSENT\s*TO | MONEY\s*SENT\s*TO
     | \bVENMO\b
 ''', re.I | re.X)
+# A category keyword that is *only* a transfer marker ("TEF A :",
+# "VENMO PAYMENT") says money moved, not to whom -- it doesn't exempt a
+# transfer from review. Anything with a payee name in it ("ACH BCOGENERAL
+# ALTAMAR", "SILEIDA AVILA") does.
+_GENERIC_KEYWORD_RE = re.compile(r'''^\s*(
+      TEF\s+A\s*:?
+    | ACH(\s+XPR:?|\s+\S+)?
+    | VENMO(\s+PAYMENT)?
+    | ZELLE(\s+MONEY\s+SENT(\s+TO)?)?
+    | (PAGO\s+)?YAPPY(\s+BG)?(\s+A)?
+    | BANCA\s+(MOVIL|EN\s+LINEA)(\s+TRANSFERENCIA(\s+A)?)?
+    | TRANSFERENCIA(\s+A)?
+    | BAC_INTERNATION
+)\s*$''', re.I | re.X)
 _BUSINESS_RE = re.compile(r'\b(S\.?\s?A|S\.?\s?DE\s+R\.?\s?L|INC|LLC|PLLC|CORP|LTDA?)\b\.?', re.I)
 
 
@@ -264,7 +279,7 @@ class Categorizer:
         if not is_transfer_to_individual(description, amount):
             return False
         text = _match_text(merchant, description)
-        return not any(kw in text and not _P2P_RE.search(f' {kw} ')
+        return not any(kw in text and not _GENERIC_KEYWORD_RE.match(kw)
                        for row in self.category_keys for kw in (row.get('keywords') or []))
 
     def categorize_batch(self, txn_rows):

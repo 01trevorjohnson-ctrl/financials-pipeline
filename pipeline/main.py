@@ -44,8 +44,7 @@ from typing import List
 from . import db
 from . import drive_client
 from . import naming
-from .categorize import (Categorizer, NEEDS_REVIEW_THRESHOLD, UNCATEGORIZED, fallback_flow,
-                         llm_categorize_uncategorized)
+from .categorize import Categorizer, NEEDS_REVIEW_THRESHOLD, UNCATEGORIZED, llm_categorize_uncategorized
 from .parsers import parse_file
 from .parsers.common import UnrecognizedStatementError
 
@@ -137,13 +136,16 @@ def account_name_for_statement(result) -> str:
 
 
 def drop_rows_already_in_ledger(supabase, result):
-    """For rolling exports (``ParseResult.dedupe_against_ledger``): drop
-    parsed rows whose (date, amount) is already in ``transactions`` for the
-    same account, so overlapping downloads don't double-insert. Matched as
-    a multiset -- two identical $50 rows on one day in the file with one
-    already in the ledger keeps exactly one. Descriptions aren't compared,
-    since the historical backfill for the account used a different source
-    format with different wording for the same movements.
+    """Drop parsed rows whose (date, amount) is already in ``transactions``
+    for the same account, so a file that overlaps earlier uploads (a
+    rolling export, a re-downloaded statement, a PDF of a month already
+    loaded from CSV) is processed for its new rows instead of
+    double-inserting. Runs for every format, after reconciliation (which
+    checks the whole file as printed). Matched as a multiset -- two
+    identical $50 rows on one day in the file with one already in the
+    ledger keeps exactly one. Descriptions aren't compared, since the same
+    movement is worded differently across source formats (CSV vs PDF, and
+    the historical backfills).
 
     Returns (new ParseResult, number of rows skipped); the reconciliation
     detail is extended to say how many were skipped.
@@ -221,11 +223,10 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
     # Naming uses the file's full parsed span, even if dedupe below drops rows.
     dates = [t.date for t in result.rows]
 
-    # ---- skip rows already in the ledger (rolling exports only) -------------
-    if result.dedupe_against_ledger:
-        result, skipped = drop_rows_already_in_ledger(supabase, result)
-        if skipped:
-            logger.info('Skipped %d row(s) already in the ledger for %s', skipped, original_filename)
+    # ---- skip rows already in the ledger (overlapping uploads) ---------------
+    result, skipped = drop_rows_already_in_ledger(supabase, result)
+    if skipped:
+        logger.info('Skipped %d row(s) already in the ledger for %s', skipped, original_filename)
 
     # ---- categorize --------------------------------------------------------
     wise_giving, wise_invest = db.get_wise_category_counts(supabase)
@@ -238,7 +239,7 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
                     for r in result.rows]
     for i, flagged in enumerate(person_flags):
         if flagged:
-            cats[i] = (UNCATEGORIZED, fallback_flow(result.rows[i].type, result.rows[i].amount))
+            cats[i] = (UNCATEGORIZED, 'Spend')    # outgoing, to a person -- never 'CC payment'
 
     # ---- LLM fallback for rows no keyword matched ---------------------------
     # One batched call per statement, covering every row categorize_batch left
