@@ -20,7 +20,7 @@ from . import (
     robinhood_visa,
     panama_mastercard_csv,
     panama_debit_bac,
-    banco_general_transfers,
+    banco_general_movimientos,
     amex_connectmiles_pdf,
     amex_connectmiles_csv,
 )
@@ -37,7 +37,7 @@ REGISTRY = [
     (amex_connectmiles_pdf, True),
     (panama_mastercard_csv, False),
     (panama_debit_bac, False),
-    (banco_general_transfers, True),
+    (banco_general_movimientos, True), # savings "Últimos movimientos"
     (robinhood_visa, False),           # csv or xlsx
     (robinhood_spending, False),
 ]
