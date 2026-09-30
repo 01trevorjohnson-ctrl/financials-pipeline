@@ -135,6 +135,41 @@ def account_name_for_statement(result) -> str:
     return ' & '.join(result.accounts_covered) if result.accounts_covered else 'Unknown account'
 
 
+def drop_rows_already_in_ledger(supabase, result):
+    """For rolling exports (``ParseResult.dedupe_against_ledger``): drop
+    parsed rows whose (date, amount) is already in ``transactions`` for the
+    same account, so overlapping downloads don't double-insert. Matched as
+    a multiset -- two identical $50 rows on one day in the file with one
+    already in the ledger keeps exactly one. Descriptions aren't compared,
+    since the historical backfill for the account used a different source
+    format with different wording for the same movements.
+
+    Returns (new ParseResult, number of rows skipped); the reconciliation
+    detail is extended to say how many were skipped.
+    """
+    existing = {}
+    for card in {r.card for r in result.rows}:
+        card_dates = [r.date for r in result.rows if r.card == card]
+        for d, amt in db.get_transaction_date_amounts(supabase, card, min(card_dates), max(card_dates)):
+            key = (card, d, amt)
+            existing[key] = existing.get(key, 0) + 1
+
+    kept = []
+    for r in result.rows:
+        key = (r.card, r.date.isoformat(), round(r.amount, 2))
+        if existing.get(key):
+            existing[key] -= 1
+        else:
+            kept.append(r)
+
+    skipped = len(result.rows) - len(kept)
+    if not skipped:
+        return result, 0
+    detail = (f'{result.reconciliation_detail} {skipped} row(s) already in the ledger '
+              f'(overlap with an earlier export) skipped; {len(kept)} new.')
+    return dataclasses.replace(result, rows=kept, reconciliation_detail=detail), skipped
+
+
 def process_one_file(drive_service, supabase, file_meta: dict, category_keys) -> FileRunResult:
     file_id = file_meta['id']
     original_filename = file_meta['name']
@@ -182,6 +217,15 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
     logger.info('Reconciled OK: %s (%d rows) -- %s', original_filename, len(result.rows),
                 result.reconciliation_detail)
 
+    # Naming uses the file's full parsed span, even if dedupe below drops rows.
+    dates = [t.date for t in result.rows]
+
+    # ---- skip rows already in the ledger (rolling exports only) -------------
+    if result.dedupe_against_ledger:
+        result, skipped = drop_rows_already_in_ledger(supabase, result)
+        if skipped:
+            logger.info('Skipped %d row(s) already in the ledger for %s', skipped, original_filename)
+
     # ---- categorize --------------------------------------------------------
     wise_giving, wise_invest = db.get_wise_category_counts(supabase)
     categorizer = Categorizer(category_keys, wise_giving, wise_invest)
@@ -207,7 +251,6 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
             cats[i] = (category, flow)
 
     # ---- build standardized filename ---------------------------------------
-    dates = [t.date for t in result.rows]
     standardized_name = naming.build_standardized_filename(
         start=min(dates), end=max(dates), account_names=result.accounts_covered or [account_name],
         extension=naming.extension_of(original_filename))

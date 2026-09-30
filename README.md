@@ -106,7 +106,7 @@ contract (see section 1).
    Documents (Standardized Names)" naming convention -- "AMEX",
    "AAdvantage", "Costco", "Quicksilver", "Huntington", "360 Checking/
    Savings", "Panama Mastercard" / `2849`/`3029`, "BAC"/"debit"/`0794`,
-   "Banco General"/"transfers", "Robinhood Visa"/`9669`, "Robinhood
+   "Banco General"/"movimientos", "Robinhood Visa"/`9669`, "Robinhood
    spending"), then falls back to sniffing file content (header rows, PDF
    text markers) if the filename doesn't clearly match. See
    `pipeline/parsers/__init__.py` (`REGISTRY`, `detect_parser`).
@@ -117,11 +117,12 @@ contract (see section 1).
    inserted -- `processed_statements` gets `status='error'`,
    `reconciliation_ok=false`, and the diff in `reconciliation_detail`; the
    file is left in the Drive root untouched so a human notices.
-   *(Two source formats -- the Robinhood spending CSV export and the Banco
-   General transfers PDF -- have no independently-printed total or balance
-   at all, by the household's own notes. Those two do a structural sanity
-   check instead and are documented as an explicit exception; see the
-   "Assumptions" section below.)*
+   *(One source format -- the Robinhood spending CSV export -- has no
+   independently-printed total or balance at all, by the household's own
+   notes. It does a structural sanity check instead and is documented as an
+   explicit exception; see the "Assumptions" section below. The Banco
+   General "Últimos movimientos" export is a rolling window, so rows already
+   in the ledger are skipped -- also covered there.)*
 6. **Categorizes** every row against `category_keys` (ascending
    `priority`, first keyword match wins), plus the special cases from
    `category_keys.notes` that aren't plain keyword matching -- implemented
@@ -654,14 +655,26 @@ confirm.
   Adjust `naming.build_standardized_filename` if the household prefers a
   different convention (or two separately-renamed copies) once they see a
   real example.
-- **No independent statement total** (Robinhood spending CSV export, Banco
-  General transfers PDF): both formats genuinely carry no printed
-  ending-balance/total line per the household's own notes on the original
-  source data. These two parsers do a structural sanity check (every row
-  parses to a valid date + amount) instead of a true reconciliation, and
-  say so explicitly in `reconciliation_detail`. Every other format (the 9
-  remaining account types) reconciles against a real printed figure or an
-  internally-consistent running balance column.
+- **No independent statement total** (Robinhood spending CSV export):
+  this format genuinely carries no printed ending-balance/total line per
+  the household's own notes on the original source data. Its parser does a
+  structural sanity check (every row parses to a valid date + amount)
+  instead of a true reconciliation, and says so explicitly in
+  `reconciliation_detail`. Every other format reconciles against a real
+  printed figure or an internally-consistent running balance column.
+- **Banco General is a rolling export, not a statement.** The household's
+  only Banco General source is the savings account's "Últimos movimientos"
+  PDF (`ULTIMOS-MOVIMIENTOS-CUENTA-DE-AHORROS-YYYY-MM-DD.pdf`), which
+  replaced the older outgoing-transfers-only "Transacciones realizadas"
+  PDF; rows still land on the `Banco General transfers (Panama)` account so
+  history stays continuous. It reconciles against its running "Saldo
+  total" column and the printed header balance. Because consecutive
+  downloads overlap, its parser sets `ParseResult.dedupe_against_ledger`
+  and `main.py` skips rows whose (date, amount) is already in
+  `transactions` for that account (matched as a multiset, ignoring
+  description wording, since the historical backfill used different
+  wording). Download a new export at least every "last N movements" window
+  so no gap opens between files.
 - **Needs-review threshold semantics**: "sum >= $50 OR any single row >=
   $50" is logically just "sum >= $50" (sum of absolute values is always >=
   any individual absolute value), and when it fires, *all* of that

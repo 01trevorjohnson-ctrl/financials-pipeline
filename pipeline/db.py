@@ -77,6 +77,28 @@ def insert_transactions(client: Client, rows: list) -> list:
     return inserted
 
 
+def get_transaction_date_amounts(client: Client, card: str, start, end) -> list:
+    """(date ISO string, amount) of every existing transaction on ``card``
+    between ``start`` and ``end`` inclusive, paged past PostgREST's row cap."""
+    out = []
+    PAGE = 1000
+    offset = 0
+    while True:
+        resp = (client.table('transactions')
+                .select('date, amount')
+                .eq('card', card)
+                .gte('date', start.isoformat())
+                .lte('date', end.isoformat())
+                .order('id')
+                .range(offset, offset + PAGE - 1)
+                .execute())
+        rows = resp.data or []
+        out.extend((r['date'], round(float(r['amount']), 2)) for r in rows)
+        if len(rows) < PAGE:
+            return out
+        offset += PAGE
+
+
 def insert_needs_review(client: Client, rows: list) -> list:
     if not rows:
         return []
