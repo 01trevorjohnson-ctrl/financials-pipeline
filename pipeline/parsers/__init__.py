@@ -26,6 +26,7 @@ from . import (
     amex_connectmiles_pdf,
     amex_connectmiles_csv,
 )
+from . import llm_extract
 from .common import UnrecognizedStatementError, ParseResult, is_pdf
 
 # Order matters for filename-hint matching: more specific patterns first.
@@ -81,9 +82,23 @@ def detect_parser(filename: str, content: bytes):
     return None
 
 
-def parse_file(filename: str, content: bytes) -> ParseResult:
+def parse_file(filename: str, content: bytes, allow_llm: bool = True) -> ParseResult:
+    """Parse with the matching dedicated parser; if none matches, fall back
+    to AI extraction (``llm_extract``), whose rows are only returned after
+    the pipeline's own account and balance checks. ``allow_llm=False``
+    skips the fallback (main.py passes it for a file the AI already failed
+    on, so a scheduled run doesn't pay for the same failure again)."""
     module = detect_parser(filename, content)
-    if module is None:
+    if module is not None:
+        return module.parse(content, filename)
+    reason = f'"{filename}" did not match any known statement format (by filename or content sniff)'
+    if not llm_extract.is_configured():
+        # Not a failure of the file: retried on every run until a key is set.
+        raise UnrecognizedStatementError(f'{reason} (AI fallback off: ANTHROPIC_API_KEY not set)')
+    if not allow_llm:
         raise UnrecognizedStatementError(
-            f'"{filename}" did not match any known statement format (by filename or content sniff)')
-    return module.parse(content, filename)
+            f'{reason}; {llm_extract.AI_FAILED_MARKER} on an earlier run, not retried')
+    try:
+        return llm_extract.extract(filename, content)
+    except llm_extract.ExtractionError as e:
+        raise UnrecognizedStatementError(f'{reason}; {llm_extract.AI_FAILED_MARKER}: {e}') from e

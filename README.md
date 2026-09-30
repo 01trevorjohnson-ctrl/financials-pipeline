@@ -168,6 +168,37 @@ contract (see section 1).
    threshold is adjustable** -- it's `NEEDS_REVIEW_THRESHOLD` in
    `pipeline/categorize.py`.
 
+### AI extraction fallback (formats with no dedicated parser)
+
+When no parser in `pipeline/parsers/` recognizes a file, `parse_file` sends
+it to Claude (`pipeline/parsers/llm_extract.py`, `claude-opus-5-5`, one
+streamed call with a strict JSON schema; PDFs as documents, CSV/text as
+text, XLSX converted to CSV) and asks only for what is printed: the account's
+last 4 digits, each row's date / description / amount / direction and the
+card it's listed under, and the opening and closing balance. The pipeline
+then checks it itself before anything is booked:
+
+- every row must resolve to a known account (`accounts.ACCOUNT_BY_LAST4`:
+  the "(...NNNN)" in each account name, plus a few printed account numbers
+  such as AMEX 3702-...-4474);
+- opening and closing balances are required, and the rows must bridge them
+  within $0.02 -- `opening - out + in = closing` for deposit accounts,
+  `opening + out - in = closing` for cards (`accounts.CARD_ACCOUNTS`).
+
+Anything else becomes the usual "unrecognized format" review item, with the
+reason. Booked rows are marked "AI-extracted" in `reconciliation_detail`;
+a format that keeps arriving that way should get a dedicated parser (send
+a sample). Needs `ANTHROPIC_API_KEY` on the pipeline service (without it,
+unrecognized files behave as before). **Cost:** one Opus call per
+unrecognized file; a file the AI already failed on isn't re-sent on later
+runs (it stays in the Drive root for a human, as before).
+
+Also: Google Sheets / Docs dropped in the folder are exported (XLSX / PDF)
+instead of crashing the download; an unexpected error on a file is now
+recorded on its `processed_statements` row (status `error`); and a file
+that stays unrecognized across runs keeps a single open review item
+instead of gaining one per run.
+
 ### LLM categorization fallback
 
 `category_keys` keyword matching is fast and free but only ever catches
