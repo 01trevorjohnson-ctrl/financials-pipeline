@@ -44,7 +44,8 @@ from typing import List
 from . import db
 from . import drive_client
 from . import naming
-from .categorize import Categorizer, NEEDS_REVIEW_THRESHOLD, UNCATEGORIZED, llm_categorize_uncategorized
+from .categorize import (Categorizer, NEEDS_REVIEW_THRESHOLD, UNCATEGORIZED, fallback_flow,
+                         llm_categorize_uncategorized)
 from .parsers import parse_file
 from .parsers.common import UnrecognizedStatementError
 
@@ -231,6 +232,14 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
     categorizer = Categorizer(category_keys, wise_giving, wise_invest)
     cats = categorizer.categorize_batch(result.rows)
 
+    # Transfers to individuals no specific keyword identifies: never guessed
+    # (keyword catch-all or LLM) -- left Uncategorized and always reviewed.
+    person_flags = [categorizer.is_unconfirmed_transfer_to_individual(r.merchant, r.description, r.amount)
+                    for r in result.rows]
+    for i, flagged in enumerate(person_flags):
+        if flagged:
+            cats[i] = (UNCATEGORIZED, fallback_flow(result.rows[i].type, result.rows[i].amount))
+
     # ---- LLM fallback for rows no keyword matched ---------------------------
     # One batched call per statement, covering every row categorize_batch left
     # as Uncategorized. Never blocks/fails the run -- see
@@ -241,7 +250,7 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
     for ck in category_keys:
         category_flow_map.setdefault(ck['category'], ck['flow'])
     uncategorized_indices = [(i, result.rows[i]) for i, (cat, _flow) in enumerate(cats)
-                              if cat == UNCATEGORIZED]
+                              if cat == UNCATEGORIZED and not person_flags[i]]
     if uncategorized_indices:
         llm_results = llm_categorize_uncategorized(uncategorized_indices, category_flow_map)
         if llm_results:
@@ -295,31 +304,49 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
     inserted = db.insert_transactions(supabase, txn_dicts)
     logger.info('Inserted %d transactions for %s', len(inserted), original_filename)
 
-    # ---- needs_review: significant uncategorized spend only -----------------
+    # ---- needs_review: transfers to individuals + significant uncategorized --
     # Read amount/category straight back off the rows Supabase echoed from
     # the insert, so this doesn't depend on response ordering matching
-    # txn_dicts order.
-    uncategorized = [(t, t['amount']) for t in inserted if t.get('category') == UNCATEGORIZED]
+    # txn_dicts order. Flagged person transfers are picked out of the echo by
+    # (date, amount, description), as a multiset.
+    person_keys = {}
+    for row, flagged in zip(result.rows, person_flags):
+        if flagged:
+            key = (row.date.isoformat(), round(row.amount, 2), row.description)
+            person_keys[key] = person_keys.get(key, 0) + 1
+    person_transfers, uncategorized = [], []
+    for t in inserted:
+        key = (t.get('date'), round(float(t['amount']), 2), t.get('description'))
+        if person_keys.get(key):
+            person_keys[key] -= 1
+            person_transfers.append((t, t['amount']))
+        elif t.get('category') == UNCATEGORIZED:
+            uncategorized.append((t, t['amount']))
     # Note: the spec's "sum >= $50 OR any single row >= $50" collapses to
     # just the sum check, since sum(|amounts|) >= max(|amount|) always --
     # see categorize.py module docstring for the full reasoning. When it
     # triggers, every Uncategorized row from this statement is queued.
     total_uncategorized = sum(abs(a) for (_t, a) in uncategorized)
-    needs_review_queued = 0
+    review_rows = [
+        (t, a, f'transfer to an individual, ${abs(a):.2f} -- choose a category')
+        for (t, a) in person_transfers]
     if uncategorized and total_uncategorized >= NEEDS_REVIEW_THRESHOLD:
-        review_rows = [{
+        review_rows += [(t, a, f'unrecognized merchant, ${abs(a):.2f} uncategorized')
+                        for (t, a) in uncategorized]
+    needs_review_queued = 0
+    if review_rows:
+        db.insert_needs_review(supabase, [{
             'transaction_id': t['id'],
             'statement_id': statement_id,
-            'reason': f'unrecognized merchant, ${abs(a):.2f} uncategorized',
+            'reason': reason,
             'amount': a,
             'merchant': t.get('merchant'),
             'description': t.get('description'),
             'status': 'open',
-        } for (t, a) in uncategorized]
-        db.insert_needs_review(supabase, review_rows)
+        } for (t, a, reason) in review_rows])
         needs_review_queued = len(review_rows)
-        logger.info('Queued %d needs_review rows ($%.2f uncategorized total)',
-                    needs_review_queued, total_uncategorized)
+        logger.info('Queued %d needs_review rows (%d transfer(s) to individuals; $%.2f other uncategorized)',
+                    needs_review_queued, len(person_transfers), total_uncategorized)
 
     # ---- move + rename in Drive ------------------------------------------------
     # NOT a copy-then-move: Google Drive service accounts have zero storage
