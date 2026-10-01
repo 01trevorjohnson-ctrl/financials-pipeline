@@ -112,6 +112,19 @@ def has_open_statement_review(client: Client, statement_id: str) -> bool:
     return bool(resp.data)
 
 
+def dismiss_open_statement_reviews(client: Client, statement_id: str) -> None:
+    """Close the open file-level review items for a statement that has now
+    processed successfully. Transaction-level items are left alone."""
+    import datetime
+    (client.table('needs_review')
+     .update({'status': 'dismissed',
+              'resolved_at': datetime.datetime.now(datetime.timezone.utc).isoformat()})
+     .eq('statement_id', statement_id)
+     .is_('transaction_id', 'null')
+     .eq('status', 'open')
+     .execute())
+
+
 def insert_needs_review(client: Client, rows: list) -> list:
     if not rows:
         return []

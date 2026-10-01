@@ -10,10 +10,17 @@ convention (money out = positive) as-is -- no sign flip needed.
 
 Reconciliation strategy: this format has no separate "statement total" line,
 but it DOES carry a running balance on every row, which is itself
-effectively a printed, per-transaction checkpoint. We reconcile by checking
-internal consistency of that running balance: for consecutive rows (sorted
-oldest-first), balance[i] must equal balance[i-1] - amount[i] within
-tolerance.
+effectively a printed, per-transaction checkpoint. Balance is the amount
+OWED on the card after that row, so for consecutive posted rows in
+chronological order balance[i] must equal balance[i-1] + amount[i]
+(purchases raise it, payments/refunds -- negative amounts -- lower it),
+checked on the Sept 2026 export. The export lists rows newest first;
+chronological order is taken from the file's own row order (same-day rows
+can't be ordered by the "6:53 PM"-style Time text).
+
+Pending rows carry no Balance and may still change amount before they post,
+so they're skipped -- the next export has them as Posted, and the ledger
+dedupe skips anything already loaded.
 """
 from __future__ import annotations
 
@@ -74,8 +81,16 @@ def _read_xlsx_rows(content: bytes):
 
 
 def _read_csv_rows(content: bytes):
-    text = sniff_text(content, ('utf-8-sig', 'cp1252'))
-    return list(csv.reader(io.StringIO(text)))
+    # Re-saving the export in a spreadsheet app can change the encoding
+    # (UTF-16 "Unicode text") or, in a Spanish/Panama locale, the delimiter
+    # (semicolons) -- accept those as well as the original.
+    if content[:2] in (b'\xff\xfe', b'\xfe\xff'):
+        text = content.decode('utf-16')
+    else:
+        text = sniff_text(content, ('utf-8-sig', 'cp1252'))
+    first = next((ln for ln in text.splitlines() if ln.strip()), '')
+    delim = max((',', ';', '\t'), key=first.count)
+    return list(csv.reader(io.StringIO(text), delimiter=delim))
 
 
 def _to_date(v):
@@ -123,7 +138,11 @@ def parse(content: bytes, filename: str) -> ParseResult:
             description=re.sub(r'\s{2,}', ' ', str(v('Description') or '').strip()),
         ))
 
-    parsed.sort(key=lambda r: (r['date'], r['time'] or ''))
+    # Oldest first, keeping the file's order within a day.
+    if len(parsed) > 1 and parsed[0]['date'] > parsed[-1]['date']:
+        parsed.reverse()
+    pending = [p for p in parsed if str(p['status']).strip().lower() == 'pending']
+    parsed = [p for p in parsed if p not in pending]
 
     txns = [
         TxnRow(date=p['date'], time=p['time'], cardholder=p['cardholder'],
@@ -137,7 +156,7 @@ def parse(content: bytes, filename: str) -> ParseResult:
     mismatches = []
     for i in range(1, len(with_balance)):
         prev_bal = with_balance[i - 1]['balance']
-        expected = round(prev_bal - with_balance[i]['amount'], 2)
+        expected = round(prev_bal + with_balance[i]['amount'], 2)
         actual = with_balance[i]['balance']
         if abs(expected - actual) > RECONCILE_TOLERANCE:
             mismatches.append((with_balance[i]['date'], expected, actual))
@@ -152,6 +171,8 @@ def parse(content: bytes, filename: str) -> ParseResult:
     else:
         ok = True
         detail = f'running balance internally consistent across {len(with_balance)} rows'
+    if pending:
+        detail += f'; {len(pending)} pending row(s) skipped until they post'
 
     close_date = max((t.date for t in txns), default=datetime.date.today())
     period_label = f'{min((t.date for t in txns), default=close_date)}..{close_date}'
