@@ -236,8 +236,7 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
         logger.info('Skipped %d row(s) already in the ledger for %s', skipped, original_filename)
 
     # ---- categorize --------------------------------------------------------
-    wise_giving, wise_invest = db.get_wise_category_counts(supabase)
-    categorizer = Categorizer(category_keys, wise_giving, wise_invest)
+    categorizer = Categorizer(category_keys)
     cats = categorizer.categorize_batch(result.rows)
 
     # Transfers to individuals no specific keyword identifies: never guessed
@@ -257,8 +256,10 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
     category_flow_map = {}
     for ck in category_keys:
         category_flow_map.setdefault(ck['category'], ck['flow'])
+    # Wise transfers are never guessed either -- always reviewed.
+    wise_flags = [categorizer.is_unreviewed_wise_transfer(r.merchant, r.description) for r in result.rows]
     uncategorized_indices = [(i, result.rows[i]) for i, (cat, _flow) in enumerate(cats)
-                              if cat == UNCATEGORIZED and not person_flags[i]]
+                              if cat == UNCATEGORIZED and not person_flags[i] and not wise_flags[i]]
     if uncategorized_indices:
         llm_results = llm_categorize_uncategorized(uncategorized_indices, category_flow_map)
         if llm_results:
@@ -320,17 +321,22 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
     # the insert, so this doesn't depend on response ordering matching
     # txn_dicts order. Flagged person transfers are picked out of the echo by
     # (date, amount, description), as a multiset.
-    person_keys = {}
-    for row, flagged in zip(result.rows, person_flags):
+    person_keys, wise_keys = {}, {}
+    for row, flagged, wise in zip(result.rows, person_flags, wise_flags):
+        key = (row.date.isoformat(), round(row.amount, 2), row.description)
         if flagged:
-            key = (row.date.isoformat(), round(row.amount, 2), row.description)
             person_keys[key] = person_keys.get(key, 0) + 1
-    person_transfers, uncategorized = [], []
+        elif wise:
+            wise_keys[key] = wise_keys.get(key, 0) + 1
+    person_transfers, wise_transfers, uncategorized = [], [], []
     for t in inserted:
         key = (t.get('date'), round(float(t['amount']), 2), t.get('description'))
         if person_keys.get(key):
             person_keys[key] -= 1
             person_transfers.append((t, t['amount']))
+        elif wise_keys.get(key):
+            wise_keys[key] -= 1
+            wise_transfers.append((t, t['amount']))
         elif t.get('category') == UNCATEGORIZED:
             uncategorized.append((t, t['amount']))
     # Note: the spec's "sum >= $50 OR any single row >= $50" collapses to
@@ -341,6 +347,8 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
     review_rows = [
         (t, a, f'transfer to an individual, ${abs(a):.2f} -- choose a category')
         for (t, a) in person_transfers]
+    review_rows += [(t, a, f'Wise transfer, ${abs(a):.2f} -- choose a category')
+                    for (t, a) in wise_transfers]
     if uncategorized and total_uncategorized >= NEEDS_REVIEW_THRESHOLD:
         review_rows += [(t, a, f'unrecognized merchant, ${abs(a):.2f} uncategorized')
                         for (t, a) in uncategorized]
@@ -356,8 +364,8 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
             'status': 'open',
         } for (t, a, reason) in review_rows])
         needs_review_queued = len(review_rows)
-        logger.info('Queued %d needs_review rows (%d transfer(s) to individuals; $%.2f other uncategorized)',
-                    needs_review_queued, len(person_transfers), total_uncategorized)
+        logger.info('Queued %d needs_review rows (%d transfer(s) to individuals; %d Wise; $%.2f other uncategorized)',
+                    needs_review_queued, len(person_transfers), len(wise_transfers), total_uncategorized)
 
     # ---- move + rename in Drive ------------------------------------------------
     # NOT a copy-then-move: Google Drive service accounts have zero storage

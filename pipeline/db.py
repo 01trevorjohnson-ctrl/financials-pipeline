@@ -131,19 +131,3 @@ def insert_needs_review(client: Client, rows: list) -> list:
     resp = client.table('needs_review').insert(rows).execute()
     return resp.data or []
 
-
-def get_wise_category_counts(client: Client) -> tuple:
-    """Count of existing transactions already tagged as the two Wise-split
-    categories, used to seed the alternation so it stays balanced across
-    separate pipeline runs (not just within one statement)."""
-    giving = (client.table('transactions')
-              .select('id', count='exact')
-              .eq('category', 'Charitable giving')
-              .ilike('description', '%WISE%')
-              .execute())
-    invest = (client.table('transactions')
-              .select('id', count='exact')
-              .eq('category', 'Investment')
-              .ilike('description', '%WISE%')
-              .execute())
-    return (giving.count or 0), (invest.count or 0)
