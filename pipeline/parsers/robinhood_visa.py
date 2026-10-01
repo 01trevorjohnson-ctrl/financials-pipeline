@@ -30,25 +30,40 @@ EXPECTED_COLUMNS = ['Date', 'Time', 'Cardholder', 'Amount', 'Points', 'Balance',
                     'Status', 'Type', 'Merchant', 'Description']
 
 
+FILENAME_HINTS = ('robinhood visa', 'robinhood credit card', 'robinhood card', '9669')
+
+
+def _norm(c) -> str:
+    return str(c if c is not None else '').strip().strip('"').strip('\ufeff').strip().lower()
+
+
+def _read_rows(content: bytes):
+    """CSV or XLSX, decided by the bytes (exports arrive with or without an
+    extension, and Drive may have converted them)."""
+    return _read_xlsx_rows(content) if content[:2] == b'PK' else _read_csv_rows(content)
+
+
+def _column_index(header) -> dict:
+    """Expected column name -> position, matched case-insensitively, so a
+    reordered or extended export still reads correctly. Raises ValueError
+    naming what's missing."""
+    pos = {_norm(c): i for i, c in enumerate(header)}
+    missing = [c for c in EXPECTED_COLUMNS if c.lower() not in pos]
+    if missing:
+        raise ValueError(f'Robinhood card export is missing column(s) {missing}; '
+                         f'header was {[str(c) for c in header]}')
+    return {c: pos[c.lower()] for c in EXPECTED_COLUMNS}
+
+
 def matches(filename: str, content: bytes) -> bool:
-    fn = filename.lower()
-    if 'robinhood visa' in fn or '9669' in fn:
+    if any(h in filename.lower() for h in FILENAME_HINTS):
         return True
-    if fn.endswith('.csv'):
-        try:
-            text = sniff_text(content, ('utf-8-sig',))
-            header = text.splitlines()[0] if text.splitlines() else ''
-            cols = [c.strip() for c in header.split(',')]
-            return cols[:len(EXPECTED_COLUMNS)] == EXPECTED_COLUMNS
-        except Exception:
-            return False
-    if fn.endswith('.xlsx'):
-        try:
-            rows = _read_xlsx_rows(content)
-            return rows and [str(c).strip() for c in rows[0][:len(EXPECTED_COLUMNS)]] == EXPECTED_COLUMNS
-        except Exception:
-            return False
-    return False
+    try:
+        rows = _read_rows(content)
+        _column_index(rows[0])
+        return True
+    except Exception:
+        return False
 
 
 def _read_xlsx_rows(content: bytes):
@@ -82,32 +97,30 @@ def _to_float(v):
 
 
 def parse(content: bytes, filename: str) -> ParseResult:
-    if filename.lower().endswith('.xlsx'):
-        raw_rows = _read_xlsx_rows(content)
-    else:
-        raw_rows = _read_csv_rows(content)
-
+    raw_rows = [r for r in _read_rows(content) if r and any(c not in (None, '') for c in r)]
     if not raw_rows:
         raise ValueError('Empty Robinhood Visa export')
+    col = _column_index(raw_rows[0])
     body = raw_rows[1:]
 
     parsed = []
     for r in body:
-        if r is None or r[0] is None:
-            continue
-        d = _to_date(r[0])
+        def v(name):
+            i = col[name]
+            return r[i] if i < len(r) else None
+        d = _to_date(v('Date'))
         if d is None:
             continue
-        amt = _to_float(r[3])
+        amt = _to_float(v('Amount'))
         if amt is None:
             continue
         parsed.append(dict(
-            date=d, time=(str(r[1]).strip() if r[1] not in (None, '') else None),
-            cardholder=(r[2] or None), amount=round(amt, 2),
-            points=_to_float(r[4]), balance=_to_float(r[5]),
-            status=(r[6] or 'Posted'), typ=(r[7] or 'Purchase'),
-            merchant=re.sub(r'\s{2,}', ' ', str(r[8] or '').strip()),
-            description=re.sub(r'\s{2,}', ' ', str(r[9] or '').strip()),
+            date=d, time=(str(v('Time')).strip() if v('Time') not in (None, '') else None),
+            cardholder=(v('Cardholder') or None), amount=round(amt, 2),
+            points=_to_float(v('Points')), balance=_to_float(v('Balance')),
+            status=(v('Status') or 'Posted'), typ=(v('Type') or 'Purchase'),
+            merchant=re.sub(r'\s{2,}', ' ', str(v('Merchant') or '').strip()),
+            description=re.sub(r'\s{2,}', ' ', str(v('Description') or '').strip()),
         ))
 
     parsed.sort(key=lambda r: (r['date'], r['time'] or ''))
