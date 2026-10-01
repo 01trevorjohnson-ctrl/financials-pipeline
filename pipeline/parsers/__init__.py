@@ -83,22 +83,55 @@ def detect_parser(filename: str, content: bytes):
 
 
 def parse_file(filename: str, content: bytes, allow_llm: bool = True) -> ParseResult:
-    """Parse with the matching dedicated parser; if none matches, fall back
-    to AI extraction (``llm_extract``), whose rows are only returned after
-    the pipeline's own account and balance checks. ``allow_llm=False``
-    skips the fallback (main.py passes it for a file the AI already failed
-    on, so a scheduled run doesn't pay for the same failure again)."""
+    """Turn any dropped-in file into a ParseResult, with as little human
+    involvement as possible:
+
+    1. A dedicated parser that matches and reconciles wins (free, exact).
+    2. Otherwise -- no parser matches, the parser raised (layout changed),
+       or its numbers don't reconcile -- the AI reader (``llm_extract``)
+       reads the file. Its result is returned if it reconciles or carries
+       no balances to check (booked as unverified).
+    3. If the AI result doesn't add up either, the dedicated parser's
+       result (if any) is returned so its own detail reaches Review;
+       otherwise the AI's not-OK result.
+
+    Raises UnrecognizedStatementError only when nothing usable came back.
+    ``allow_llm=False`` skips the AI (main.py passes it for a file that
+    already failed under the current AI version, so scheduled runs don't
+    pay for the same failure again).
+    """
     module = detect_parser(filename, content)
+    dedicated, problem = None, None
     if module is not None:
-        return module.parse(content, filename)
-    reason = f'"{filename}" did not match any known statement format (by filename or content sniff)'
-    if not llm_extract.is_configured():
-        # Not a failure of the file: retried on every run until a key is set.
-        raise UnrecognizedStatementError(f'{reason} (AI fallback off: ANTHROPIC_API_KEY not set)')
-    if not allow_llm:
-        raise UnrecognizedStatementError(
-            f'{reason}; {llm_extract.AI_FAILED_MARKER} on an earlier run, not retried')
+        name = module.__name__.rsplit('.', 1)[-1]
+        try:
+            dedicated = module.parse(content, filename)
+        except Exception as e:
+            problem = f'{name} parser failed: {e}'
+        else:
+            if dedicated.reconciliation_ok:
+                return dedicated
+            problem = f'{name}: {dedicated.reconciliation_detail}'
+
+    reason = problem or f'"{filename}" did not match any known statement format'
+    if not llm_extract.is_configured() or not allow_llm:
+        if dedicated is not None:
+            return dedicated
+        why = ('AI reader off: ANTHROPIC_API_KEY not set' if not llm_extract.is_configured()
+               else f'{llm_extract.AI_FAILED_MARKER} on an earlier run, not retried')
+        raise UnrecognizedStatementError(f'{reason} ({why})')
+
     try:
-        return llm_extract.extract(filename, content)
+        ai = llm_extract.extract(filename, content)
     except llm_extract.ExtractionError as e:
+        if dedicated is not None:
+            dedicated.reconciliation_detail += f'; {llm_extract.AI_FAILED_MARKER}: {e}'
+            return dedicated
         raise UnrecognizedStatementError(f'{reason}; {llm_extract.AI_FAILED_MARKER}: {e}') from e
+
+    if problem:
+        ai.reconciliation_detail += f' (used instead of {problem})'
+    if ai.reconciliation_ok or dedicated is None:
+        return ai
+    dedicated.reconciliation_detail += f'; AI re-read did not add up either {llm_extract.VERSION_TAG}'
+    return dedicated

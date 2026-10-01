@@ -168,30 +168,39 @@ contract (see section 1).
    threshold is adjustable** -- it's `NEEDS_REVIEW_THRESHOLD` in
    `pipeline/categorize.py`.
 
-### AI extraction fallback (formats with no dedicated parser)
+### AI statement reader: every file gets processed
 
-When no parser in `pipeline/parsers/` recognizes a file, `parse_file` sends
-it to Claude (`pipeline/parsers/llm_extract.py`, `claude-opus-5-5`, one
-streamed call with a strict JSON schema; PDFs as documents, CSV/text as
-text, XLSX converted to CSV) and asks only for what is printed: the account's
-last 4 digits, each row's date / description / amount / direction and the
-card it's listed under, and the opening and closing balance. The pipeline
-then checks it itself before anything is booked:
+Whatever is dropped in the folder should end up in the ledger with as
+little human involvement as possible -- a missed upload is worse than an
+imperfect one. `parse_file` therefore works in tiers:
 
-- every row must resolve to a known account (`accounts.ACCOUNT_BY_LAST4`:
-  the "(...NNNN)" in each account name, plus a few printed account numbers
-  such as AMEX 3702-...-4474);
-- opening and closing balances are required, and the rows must bridge them
-  within $0.02 -- `opening - out + in = closing` for deposit accounts,
-  `opening + out - in = closing` for cards (`accounts.CARD_ACCOUNTS`).
+1. **Dedicated parser** matches and reconciles -> used (free, exact).
+2. **AI reader** (`pipeline/parsers/llm_extract.py`, `claude-opus-5-5`,
+   strict JSON schema) for everything else: unknown formats, a dedicated
+   parser that crashed (layout changed), or one whose numbers don't
+   reconcile. Reads PDFs, CSV/text, XLSX, Google Sheets/Docs (exported),
+   and **screenshots/photos** (PNG, JPEG, WebP, GIF, iPhone HEIC; oversize
+   images are shrunk). It reports which account it is -- by printed
+   account/card digits (`accounts.ACCOUNT_BY_LAST4`), else by choosing from
+   the household's account list (`llm_extract.ACCOUNT_HINTS`, e.g.
+   Robinhood exports carry no account number) -- plus each row and any
+   printed opening/closing balance. Then:
+   - balances printed and the rows bridge them -> booked as **verified**;
+   - no balances printed (activity listings, online-banking printouts,
+     screenshots) -> booked as **UNVERIFIED** (the detail says so);
+   - balances printed but the rows don't bridge them -> **re-read once**
+     with the discrepancy pointed out; still off -> Review.
+3. Only a file with no usable transactions at all, or whose account can't
+   be identified, goes to Review as "unrecognized".
 
-Anything else becomes the usual "unrecognized format" review item, with the
-reason. Booked rows are marked "AI-extracted" in `reconciliation_detail`;
-a format that keeps arriving that way should get a dedicated parser (send
-a sample). Needs `ANTHROPIC_API_KEY` on the pipeline service (without it,
-unrecognized files behave as before). **Cost:** one Opus call per
-unrecognized file; a file the AI already failed on isn't re-sent on later
-runs (it stays in the Drive root for a human, as before).
+The ledger dedupe (same account + date + amount) runs on every result, so
+overlapping or repeated uploads only add what's new. Every AI detail carries
+`llm_extract.VERSION_TAG`: a file that failed under the current version is
+not re-sent each scheduled run, and bumping the tag retries everything that
+failed under older logic. Needs `ANTHROPIC_API_KEY` on the pipeline service;
+cost is one Opus call per file the dedicated parsers can't handle (two if a
+re-read is needed). Rows that don't add up after all of this now go to
+Review (status `needs_review`) instead of sitting silently as `error`.
 
 Also: Google Sheets / Docs dropped in the folder are exported (XLSX / PDF)
 instead of crashing the download; an unexpected error on a file is now
