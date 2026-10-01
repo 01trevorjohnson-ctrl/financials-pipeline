@@ -279,6 +279,9 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
             statement_period=result.statement_period.isoformat(), status='processed',
             reconciliation_ok=True, reconciliation_detail=result.reconciliation_detail,
             row_count=len(result.rows))
+        # It failed on an earlier run; that run's file-level review item
+        # ("unrecognized format" etc.) no longer applies.
+        db.dismiss_open_statement_reviews(supabase, statement_id)
     else:
         stmt_row = db.insert_processed_statement(
             supabase, drive_file_id=file_id, original_filename=original_filename,

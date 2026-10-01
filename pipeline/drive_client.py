@@ -78,8 +78,10 @@ def list_root_files(service) -> list:
 # fails with "Only files with binary content can be downloaded". Export them
 # to a format the parsers (or the AI fallback) can read instead.
 GOOGLE_EXPORT_MIME = {
-    'application/vnd.google-apps.spreadsheet':
-        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    # CSV, not XLSX: every spreadsheet-style parser reads CSV, and Drive turns
+    # uploaded CSVs into Sheets when "convert uploads" is on. (Export covers
+    # the first sheet only, which is all these exports ever have.)
+    'application/vnd.google-apps.spreadsheet': 'text/csv',
     'application/vnd.google-apps.document': 'application/pdf',
 }
 
