@@ -130,10 +130,10 @@ contract (see section 1).
    - Self-transfer vs. gift: a Zelle/ACH transfer to **Trevor Johnson**
      himself is `Account transfer`/`Transfer`, never a gift, checked
      *before* the generic keyword loop.
-   - Wise transfers to Colombia: not split -- each whole row alternates
-     `Charitable giving` / `Investment`, ordered by date, seeded from what's
-     already in the database so the alternation stays balanced across
-     separate runs (not just within one statement).
+   - Wise transfers: never guessed -- each stays `Uncategorized` and is
+     always queued for review so the household picks the category
+     (`Charitable giving`, `Investment`...). Rows imported before 2026-10
+     keep the categories the old automatic alternation gave them.
    - `TOTAL ITBMS` (Panama VAT): produced by the CSV parsers as a single
      statement-level row, dated to the statement cutoff.
    - PedidosYa's two rows per order (order + tip): no special code needed,
@@ -754,10 +754,6 @@ confirm.
   statement's Uncategorized rows get queued (not just the large one) --
   see `pipeline/categorize.py`. `$50` lives at
   `categorize.NEEDS_REVIEW_THRESHOLD`.
-- **Wise alternation persistence**: seeded from existing DB rows
-  (`db.get_wise_category_counts`) so a fresh pipeline run continues the
-  household's existing ~50/50 split instead of restarting the alternation
-  from scratch every time.
 - **Session cookie secret**: derived from `DASHBOARD_PASSWORD` if
   `SESSION_SECRET` isn't set, purely to avoid one more required env var for
   a two-person household app. Set `SESSION_SECRET` explicitly if you'd

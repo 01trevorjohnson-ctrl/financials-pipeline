@@ -12,12 +12,13 @@ own wording of each):
    gift -- even though it might otherwise match a Gifts-category keyword
    like "TEF A :". This must run BEFORE the generic keyword loop.
 
-2. Wise transfers to Colombia: NOT split. Each whole Wise row is assigned
-   alternately ~half Charitable giving / ~half Investment (Navarra real
-   estate), ordered by date. Alternation state is derived from what's
-   already in the database (counts of existing Wise-tagged rows) so it
-   stays balanced across separate pipeline runs, not just within one
-   statement's batch.
+2. Wise transfers: never guessed. Each Wise row (other than a transfer to
+   Trevor himself) stays Uncategorized, skips the LLM fallback, and is
+   always queued for review regardless of NEEDS_REVIEW_THRESHOLD, so the
+   household picks the category (Charitable giving, Investment, ...) for
+   each one. (Until 2026-10 these alternated automatically between
+   Charitable giving and Investment; rows imported before then keep
+   those categories.)
 
 3. Income vs. Refund precedence for "ACH CRE ...": handled implicitly by
    priority ordering (Income's "NOVARTIS" keyword is checked at a lower
@@ -234,24 +235,10 @@ class Categorizer:
 
     ``category_keys`` is the list of rows from public.category_keys
     (active only), already sorted ascending by priority.
-    ``wise_giving_count``/``wise_invest_count`` seed the Wise alternation
-    from what's already in the database so a fresh pipeline run continues
-    the alternation instead of restarting it.
     """
 
-    def __init__(self, category_keys, wise_giving_count: int = 0, wise_invest_count: int = 0):
+    def __init__(self, category_keys):
         self.category_keys = category_keys
-        self._wise_giving = wise_giving_count
-        self._wise_invest = wise_invest_count
-
-    def _next_wise_category(self) -> str:
-        # Keep the two buckets as balanced as possible; ties favor Giving,
-        # matching the household's original i%2==0 -> giving convention.
-        if self._wise_giving <= self._wise_invest:
-            self._wise_giving += 1
-            return 'Charitable giving'
-        self._wise_invest += 1
-        return 'Investment'
 
     def categorize_row(self, merchant: str, description: str, txn_type: str, amount):
         """Return (category, flow) for one transaction."""
@@ -259,9 +246,8 @@ class Categorizer:
             return 'Account transfer', 'Transfer'
 
         if is_wise_transfer(merchant, description):
-            category = self._next_wise_category()
-            flow = category  # 'Charitable giving' or 'Investment' are both valid flow values
-            return category, flow
+            # Always reviewed -- see special case 2 in the module docstring.
+            return UNCATEGORIZED, fallback_flow(txn_type, amount)
 
         text = _match_text(merchant, description)
         for row in self.category_keys:
@@ -270,6 +256,11 @@ class Categorizer:
                 return row['category'], row['flow']
 
         return UNCATEGORIZED, fallback_flow(txn_type, amount)
+
+    def is_unreviewed_wise_transfer(self, merchant: str, description: str) -> bool:
+        """True for a Wise transfer that needs the household to choose its
+        category -- see special case 2 in the module docstring."""
+        return is_wise_transfer(merchant, description) and not is_self_transfer_to_trevor(description)
 
     def is_unconfirmed_transfer_to_individual(self, merchant: str, description: str, amount) -> bool:
         """True for a transfer to an individual that no *specific* category
@@ -284,27 +275,5 @@ class Categorizer:
 
     def categorize_batch(self, txn_rows):
         """Categorize a list of parsers.common.TxnRow-like objects (must
-        have .merchant, .description, .type, .amount, .date). Wise rows
-        within the SAME batch are alternated in date order before the
-        (still database-seeded) counters are consulted, so a single
-        statement with multiple Wise rows alternates correctly internally
-        too.
-        """
-        results = [None] * len(txn_rows)
-        wise_indices = sorted(
-            (i for i, r in enumerate(txn_rows) if is_wise_transfer(r.merchant, r.description)),
-            key=lambda i: txn_rows[i].date,
-        )
-        non_wise_indices = [i for i in range(len(txn_rows)) if i not in set(wise_indices)]
-
-        for i in non_wise_indices:
-            r = txn_rows[i]
-            results[i] = self.categorize_row(r.merchant, r.description, r.type, r.amount)
-        for i in wise_indices:
-            r = txn_rows[i]
-            if is_self_transfer_to_trevor(r.description):
-                results[i] = ('Account transfer', 'Transfer')
-            else:
-                category = self._next_wise_category()
-                results[i] = (category, category)
-        return results
+        have .merchant, .description, .type, .amount)."""
+        return [self.categorize_row(r.merchant, r.description, r.type, r.amount) for r in txn_rows]
