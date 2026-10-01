@@ -186,11 +186,11 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
     content = drive_client.download_file(drive_service, file_id, file_meta.get('mimeType'))
 
     # ---- parse -----------------------------------------------------------
-    # The AI fallback costs an API call per try; a file it already failed on
-    # (couldn't extract, or extracted rows that didn't reconcile) stays in
-    # the Drive root, so don't re-send it on every scheduled run.
+    # The AI reader costs an API call per try; a file it already failed on
+    # under the CURRENT version stays in the Drive root, so don't re-send it
+    # every scheduled run. Failures under an older version are retried.
     prior = (existing or {}).get('reconciliation_detail') or ''
-    allow_llm = not (llm_extract.AI_FAILED_MARKER in prior or prior.startswith('AI-extracted'))
+    allow_llm = llm_extract.VERSION_TAG not in prior
     try:
         result = parse_file(original_filename, content, allow_llm=allow_llm)
     except UnrecognizedStatementError as e:
@@ -212,9 +212,11 @@ def process_one_file(drive_service, supabase, file_meta: dict, category_keys) ->
     account_name = account_name_for_statement(result)
 
     if not result.reconciliation_ok:
+        # Shown in Review (not just logged): it's the one case nothing could
+        # make add up, so a person needs to look.
         logger.warning('RECONCILIATION FAILED: %s: %s', original_filename, result.reconciliation_detail)
         queued = _record_unprocessable(supabase, existing, file_id, original_filename,
-                                        status='error', account_name=account_name,
+                                        status='needs_review', account_name=account_name,
                                         statement_period=result.statement_period,
                                         detail=result.reconciliation_detail,
                                         row_count=len(result.rows))
